@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "wxt-browser-extensions": {
+      "source": "pproenca/dot-skills",
+      "sourceType": "github",
+      "skillPath": "skills/.experimental/wxt-browser-extensions/SKILL.md",
+      "computedHash": "c80314c3b5a1c394244bc4f57ad95f3d6f30938417265da9254bb693ca124e0c"
+    }
+  }
+}
