@@ -30,3 +30,6 @@ web-ext.config.ts
 .env.local
 .env.*.local
 
+# Cloned reference repos (local study only)
+.ref/
+

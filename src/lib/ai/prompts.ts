@@ -17,7 +17,14 @@ Guidelines:
 - Be concise for short-answer fields (1-2 sentences max)
 - Be thorough for long-answer/essay fields
 - Match the tone of the job posting (startup = casual, enterprise = formal)
-- Tailor answers specifically to this job — avoid generic responses`
+- Tailor answers specifically to this job — avoid generic responses
+
+Critical answer formats (LinkedIn Easy Apply validation is strict):
+1. Years of experience / duration / numeric questions → return ONLY a number string like "2" or "3". Never write "2 years" or a sentence.
+2. Yes/No questions → return ONLY "Yes" or "No" (or an exact option from the list).
+3. Short text with a character limit → stay under the limit; prefer a number or a few words.
+4. Do not repeat the question in the answer.
+5. For select/radio, return one of the provided options exactly as written.`
 
 // ────────────────────────────────────────────────────────────────────────────
 // Fill Fields Prompt
@@ -33,11 +40,28 @@ export function buildFillPrompt(
   fields: Array<FormField>,
 ): string {
   const fieldList = fields
-    .map(
-      (f, i) =>
-        `${i + 1}. ID: "${f.id}" | Label: "${f.label}" | Type: ${f.type}${f.required ? ' (required)' : ''}${f.options ? ` | Options: [${f.options.join(', ')}]` : ''}${f.context ? ` | Context: "${f.context}"` : ''}`,
-    )
+    .map((f, i) => {
+      const bits = [
+        `${i + 1}. ID: "${f.id}"`,
+        `Label: "${f.label}"`,
+        `Type: ${f.type}`,
+      ]
+      if (f.required) bits.push('(required)')
+      if (f.options?.length) bits.push(`Options: [${f.options.join(', ')}]`)
+      if (f.context) bits.push(`Context: "${f.context}"`)
+      if (f.maxLength) bits.push(`MaxLength: ${f.maxLength}`)
+      if (f.min != null) bits.push(`Min: ${f.min}`)
+      if (f.max != null) bits.push(`Max: ${f.max}`)
+      return bits.join(' | ')
+    })
     .join('\n')
+
+  const cached =
+    Object.keys(profile.cachedAnswers ?? {}).length > 0
+      ? Object.entries(profile.cachedAnswers)
+          .map(([k, v]) => `- ${k}: ${v}`)
+          .join('\n')
+      : 'None'
 
   return `
 ## Candidate Profile
@@ -70,7 +94,10 @@ ${profile.education
   )
   .join('\n')}
 
-**Skills:** ${profile.skills.map((s) => s.name).join(', ')}
+**Skills:** ${profile.skills.map((s) => `${s.name} (${s.level})`).join(', ')}
+
+**Preferred answers (use when the question matches):**
+${cached}
 
 **Resume Text:**
 ${profile.resumeText}
@@ -98,9 +125,11 @@ ${fieldList}
 ## Instructions
 
 Return a JSON object where each key is a field ID and each value is the answer string.
+For years-of-experience / "how many years" questions: value MUST be digits only (example: "2").
 For select/radio fields, return one of the provided options exactly as written.
-For checkbox fields, return "true" or "false".
+For checkbox fields, return "Yes" or "No".
 For file fields, return an empty string (cannot fill files automatically).
+Respect MaxLength when provided.
 
 Respond ONLY with the JSON object, no markdown, no explanation.
 `

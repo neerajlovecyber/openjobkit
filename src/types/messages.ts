@@ -121,6 +121,7 @@ export type FieldType =
   | 'radio'
   | 'file'
   | 'date'
+  | 'number'
 
 export interface FormField {
   id: string // Unique ID for this field (generated)
@@ -131,4 +132,7 @@ export interface FormField {
   options?: Array<string> // For select/radio
   selector: string // CSS selector to the DOM element
   context?: string // Extra context (e.g. surrounding section label)
+  maxLength?: number
+  min?: string
+  max?: string
 }

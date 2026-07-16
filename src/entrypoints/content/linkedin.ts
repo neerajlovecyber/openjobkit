@@ -1,7 +1,7 @@
 // LinkedIn Easy Apply content script
 // Detects job forms on LinkedIn and orchestrates the AI autofill flow.
-// After the first successful Auto-Fill, re-fills each Easy Apply step when
-// the user advances (does not auto-click Next/Submit).
+// After Auto-Fill: fills the current step, clicks Next/Review (never Submit),
+// and re-fills each following step until the final Submit screen.
 //
 // Matches: linkedin.com/jobs/* and linkedin.com/jobs/view/*
 
@@ -16,6 +16,8 @@ const DETECTED = 'data-ojk-detected'
 const STEP_DEBOUNCE_MS = 300
 const MODAL_WAIT_MS = 8000
 const FIELD_WAIT_MS = 10000
+const STEP_CHANGE_WAIT_MS = 8000
+const MAX_AUTO_STEPS = 8
 
 /** Per-modal step-watch cleanup + fill lock */
 const modalSessions = new WeakMap<
@@ -24,6 +26,8 @@ const modalSessions = new WeakMap<
     disconnectStepObserver: () => void
     lastFingerprint: string
     filling: boolean
+    /** True while Autofill owns Next/Review navigation */
+    autoAdvancing: boolean
     debounceTimer: ReturnType<typeof setTimeout> | null
   }
 >()
@@ -78,10 +82,8 @@ export function initLinkedin(ctx: ContentScriptContext) {
         cachedApplicationId = applicationId
         const modal = await ensureEasyApplyModal()
         await handleEasyApplyModal(modal)
-        const formRoot = await waitForApplyFormReady(modal)
-        await fillCurrentPage(formRoot, applicationId, {
-          activateSession: true,
-        })
+        await waitForApplyFormReady(modal)
+        await runAutofillThroughSteps(modal, applicationId)
         return { ok: true }
       } catch (err) {
         console.error('[OpenJobKit] TRIGGER_FILL failed:', err)
@@ -110,6 +112,14 @@ export function initLinkedin(ctx: ContentScriptContext) {
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/** LinkedIn safety interstitial: "Continue applying" (from classic Easy Apply bots). */
+function dismissContinueApplyingReminder() {
+  const btn = Array.from(document.querySelectorAll('button')).find((b) =>
+    /continue applying/i.test(b.textContent ?? ''),
+  )
+  if (btn && isVisibleField(btn)) btn.click()
 }
 
 function findEasyApplyModal(): HTMLElement | null {
@@ -289,10 +299,13 @@ async function ensureEasyApplyModal(): Promise<HTMLElement> {
       applyBtn.getAttribute('aria-label') ?? applyBtn.textContent?.trim(),
     )
     applyBtn.click()
+    await sleep(400)
+    dismissContinueApplyingReminder()
 
     const started = Date.now()
     while (Date.now() - started < MODAL_WAIT_MS) {
       await sleep(200)
+      dismissContinueApplyingReminder()
       modal = findEasyApplyModal()
       if (modal) break
     }
@@ -350,7 +363,7 @@ function resolveApplyFormRoot(fallback: HTMLElement): HTMLElement {
 
 function countRawControls(container: HTMLElement): number {
   return container.querySelectorAll(
-    'input[type="text"], input[type="email"], input[type="tel"], input[type="url"], input[type="number"], input:not([type]), textarea, select',
+    'input[type="text"], input[type="email"], input[type="tel"], input[type="url"], input[type="number"], input:not([type]), input[type="radio"], input[type="checkbox"], textarea, select',
   ).length
 }
 
@@ -545,7 +558,7 @@ function injectFillButton(modal: HTMLElement, applicationId: string) {
   `
 
   btn.addEventListener('click', () => {
-    void fillCurrentPage(modal, applicationId, { activateSession: true })
+    void runAutofillThroughSteps(modal, applicationId)
   })
 
   const header =
@@ -568,6 +581,7 @@ function ensureStepWatcher(modal: HTMLElement, applicationId: string) {
     disconnectStepObserver: () => {},
     lastFingerprint: fieldFingerprint(modal),
     filling: false,
+    autoAdvancing: false,
     debounceTimer: null as ReturnType<typeof setTimeout> | null,
   }
 
@@ -602,7 +616,7 @@ async function onStepMaybeChanged(modal: HTMLElement, applicationId: string) {
   const session = modalSessions.get(modal)
   if (!session) return
   if (modal.getAttribute(AUTOFILL_ACTIVE) !== 'true') return
-  if (session.filling) return
+  if (session.filling || session.autoAdvancing) return
 
   const nextFp = fieldFingerprint(modal)
   if (nextFp === session.lastFingerprint) return
@@ -612,19 +626,187 @@ async function onStepMaybeChanged(modal: HTMLElement, applicationId: string) {
   }
 
   console.log('[OpenJobKit] Easy Apply step changed — auto-refilling')
-  await fillCurrentPage(modal, applicationId, { activateSession: false })
+  await fillCurrentPage(modal, applicationId, {
+    activateSession: false,
+    advance: false,
+  })
 }
 
 function fieldFingerprint(modal: HTMLElement): string {
-  return detectFormFields(modal)
+  const root = resolveApplyFormRoot(modal)
+  return detectFormFields(root)
     .map((f) => `${f.label}|${f.type}|${f.selector}`)
     .join(';;')
+}
+
+type AdvanceKind = 'next' | 'review' | 'submit'
+
+function findAdvanceButton(
+  modal: HTMLElement,
+): { kind: AdvanceKind; button: HTMLButtonElement } | null {
+  const scope =
+    resolveApplyFormRoot(modal).closest('[role="dialog"]') ??
+    modal.closest('[role="dialog"]') ??
+    modal
+
+  const buttons = Array.from(
+    scope.querySelectorAll<HTMLButtonElement>('button'),
+  ).filter((b) => isVisibleField(b) && !b.disabled)
+
+  const textOf = (b: HTMLButtonElement) =>
+    (b.getAttribute('aria-label') ?? b.textContent ?? '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase()
+
+  const submit = buttons.find((b) => {
+    const t = textOf(b)
+    return (
+      t === 'submit application' ||
+      t === 'submit' ||
+      (t.includes('submit') && t.includes('application'))
+    )
+  })
+  if (submit) return { kind: 'submit', button: submit }
+
+  const review = buttons.find((b) => {
+    const t = textOf(b)
+    return t === 'review' || t.startsWith('review ')
+  })
+  if (review) return { kind: 'review', button: review }
+
+  const next = buttons.find((b) => {
+    const t = textOf(b)
+    return (
+      t === 'next' ||
+      t.startsWith('next ') ||
+      t === 'continue' ||
+      t.includes('continue to next') ||
+      t.includes('continue applying')
+    )
+  })
+  if (next) return { kind: 'next', button: next }
+
+  return null
+}
+
+async function waitForStepChange(
+  modal: HTMLElement,
+  previousFp: string,
+): Promise<boolean> {
+  const started = Date.now()
+  while (Date.now() - started < STEP_CHANGE_WAIT_MS) {
+    await sleep(250)
+    dismissContinueApplyingReminder()
+    const fp = fieldFingerprint(modal)
+    if (fp && fp !== previousFp) return true
+    // Progress text like "2/4" can change before fields remount
+    const progress = (
+      modal.textContent?.match(/\b(\d+)\s*\/\s*(\d+)\b/) ?? null
+    )?.join('')
+    if (progress && fp !== previousFp) return true
+  }
+  return fieldFingerprint(modal) !== previousFp
+}
+
+/** Fill every Easy Apply step; click Next/Review; stop before Submit. */
+async function runAutofillThroughSteps(
+  modal: HTMLElement,
+  applicationId: string,
+) {
+  ensureStepWatcher(modal, applicationId)
+  modal.setAttribute(AUTOFILL_ACTIVE, 'true')
+
+  const session = modalSessions.get(modal)
+  if (session) session.autoAdvancing = true
+
+  const btn =
+    (modal.querySelector('#ojk-fill-btn') as HTMLButtonElement | null) ??
+    (document.querySelector('#ojk-fill-btn') as HTMLButtonElement | null)
+
+  try {
+    for (let step = 0; step < MAX_AUTO_STEPS; step++) {
+      await waitForApplyFormReady(modal)
+      await fillCurrentPage(modal, applicationId, {
+        activateSession: true,
+        advance: false,
+      })
+
+      const advance = findAdvanceButton(modal)
+      if (!advance || advance.kind === 'submit') {
+        if (btn) {
+          btn.textContent = '✅ Filled! Review & submit.'
+          btn.disabled = false
+        }
+        console.log(
+          '[OpenJobKit] Stopped before Submit — review the application',
+        )
+        return
+      }
+
+      const beforeFp = fieldFingerprint(modal)
+      console.log(
+        `[OpenJobKit] Advancing Easy Apply (${advance.kind})… step ${step + 1}`,
+      )
+      if (btn) {
+        btn.textContent =
+          advance.kind === 'review'
+            ? '⏳ Opening review…'
+            : `⏳ Next page (${step + 1})…`
+        btn.disabled = true
+      }
+
+      advance.button.click()
+      await sleep(400)
+      dismissContinueApplyingReminder()
+
+      const changed = await waitForStepChange(modal, beforeFp)
+      if (!changed) {
+        // Still on same step — maybe validation; leave for user
+        if (btn) {
+          btn.textContent = '✅ Filled — check required fields, then Next'
+          btn.disabled = false
+        }
+        return
+      }
+
+      // After Review, usually lands on Submit — fill any leftover fields then stop
+      if (advance.kind === 'review') {
+        await waitForApplyFormReady(modal)
+        const stillFields = detectFormFields(resolveApplyFormRoot(modal))
+        if (stillFields.length > 0) {
+          await fillCurrentPage(modal, applicationId, {
+            activateSession: true,
+            advance: false,
+          })
+        }
+        if (btn) {
+          btn.textContent = '✅ Filled! Review & submit.'
+          btn.disabled = false
+        }
+        return
+      }
+    }
+
+    if (btn) {
+      btn.textContent = '✅ Filled! Review remaining steps.'
+      btn.disabled = false
+    }
+  } catch (err) {
+    if (btn) {
+      btn.textContent = '❌ Error — retry'
+      btn.disabled = false
+    }
+    throw err
+  } finally {
+    if (session) session.autoAdvancing = false
+  }
 }
 
 async function fillCurrentPage(
   modal: HTMLElement,
   applicationId: string,
-  opts: { activateSession: boolean },
+  opts: { activateSession: boolean; advance?: boolean },
 ) {
   const session = modalSessions.get(modal)
   if (session?.filling) return
@@ -649,11 +831,11 @@ async function fillCurrentPage(
 
   if (session) {
     session.filling = true
-    session.lastFingerprint = fieldFingerprint(root)
+    session.lastFingerprint = fieldFingerprint(modal)
   }
 
   const btn =
-    (root.querySelector('#ojk-fill-btn') as HTMLButtonElement | null) ??
+    (modal.querySelector('#ojk-fill-btn') as HTMLButtonElement | null) ??
     (document.querySelector('#ojk-fill-btn') as HTMLButtonElement | null)
   if (btn) {
     btn.textContent = '⏳ Filling...'
@@ -673,15 +855,25 @@ async function fillCurrentPage(
     if (result?.answers) {
       applyAnswers(root, fields, result.answers, result.coverLetter)
       if (opts.activateSession) {
-        root.setAttribute(AUTOFILL_ACTIVE, 'true')
         modal.setAttribute(AUTOFILL_ACTIVE, 'true')
+        root.setAttribute(AUTOFILL_ACTIVE, 'true')
       }
       if (session) {
-        session.lastFingerprint = fieldFingerprint(root)
+        session.lastFingerprint = fieldFingerprint(modal)
       }
-      if (btn) {
+      if (btn && !opts.advance) {
         btn.textContent = '✅ Filled!'
         btn.disabled = false
+      }
+
+      if (opts.advance) {
+        const advance = findAdvanceButton(modal)
+        if (advance && advance.kind !== 'submit') {
+          const beforeFp = fieldFingerprint(modal)
+          advance.button.click()
+          await sleep(300)
+          await waitForStepChange(modal, beforeFp)
+        }
       }
     } else if (btn) {
       btn.textContent = '✨ Auto-Fill with AI'
@@ -703,6 +895,9 @@ function detectFormFields(container: HTMLElement): Array<FormField> {
   const fields: Array<FormField> = []
   const seen = new Set<Element>()
 
+  collectRadioFields(container, fields, seen)
+  collectCheckboxFields(container, fields, seen)
+
   const controls = container.querySelectorAll<
     HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement
   >(
@@ -718,14 +913,24 @@ function detectFormFields(container: HTMLElement): Array<FormField> {
       if (
         el.type === 'hidden' ||
         el.type === 'radio' ||
-        el.type === 'checkbox'
+        el.type === 'checkbox' ||
+        el.type === 'file' ||
+        el.type === 'submit' ||
+        el.type === 'button'
       ) {
         return
       }
     }
-    // Skip strict visibility — SDUI LazyColumn often reports 0x0 briefly
+
+    const questionRoot =
+      el.closest('[data-test-form-element]') ??
+      el.closest('fieldset') ??
+      el.closest('[class*="form-element"]')
 
     const label =
+      (questionRoot
+        ? preferVisuallyHiddenText(questionRoot.querySelector('label, legend'))
+        : null) ??
       findLabel(el, container) ??
       inferLabelFallback(el) ??
       `Field ${fields.length + 1}`
@@ -741,7 +946,9 @@ function detectFormFields(container: HTMLElement): Array<FormField> {
           ? 'select'
           : el.tagName === 'TEXTAREA'
             ? 'textarea'
-            : 'text',
+            : el instanceof HTMLInputElement && el.type === 'number'
+              ? 'number'
+              : 'text',
       required: el.required,
       placeholder:
         el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
@@ -749,13 +956,37 @@ function detectFormFields(container: HTMLElement): Array<FormField> {
           : undefined,
       options:
         el instanceof HTMLSelectElement
-          ? Array.from(el.options).map((o) => o.text)
+          ? Array.from(el.options)
+              .map((o) => o.text.trim())
+              .filter(Boolean)
           : undefined,
       selector: `[data-ojk-field="${fieldId}"]`,
+      maxLength:
+        el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
+          ? el.maxLength > 0 && el.maxLength < 500_000
+            ? el.maxLength
+            : undefined
+          : undefined,
+      min: el instanceof HTMLInputElement ? el.min || undefined : undefined,
+      max: el instanceof HTMLInputElement ? el.max || undefined : undefined,
     })
   })
 
-  // If this root is a shell without controls, search the SDUI EasyApply subtree
+  // Detect resume upload step (informational; file path inject is not possible in extensions)
+  const fileInput =
+    container.querySelector<HTMLInputElement>('input[type="file"]')
+  if (fileInput && !seen.has(fileInput)) {
+    const hasAttachment =
+      !!container.querySelector(
+        'button[aria-label*="Remove" i], .ui-attachment, [class*="ui-attachment"]',
+      ) || !!container.querySelector('input[type="radio"][checked]')
+    if (!hasAttachment) {
+      console.log(
+        '[OpenJobKit] Resume upload step detected — select a LinkedIn saved resume or upload manually',
+      )
+    }
+  }
+
   if (fields.length === 0) {
     const sdui = document.querySelector<HTMLElement>(
       '[data-sdui-screen*="EasyApply"], [data-sdui-screen*="easyapply"]',
@@ -766,6 +997,145 @@ function detectFormFields(container: HTMLElement): Array<FormField> {
   }
 
   return fields
+}
+
+function preferVisuallyHiddenText(el: Element | null): string | null {
+  if (!el) return null
+  const hidden = el.querySelector('.visually-hidden')
+  return cleanLabelText(hidden?.textContent) ?? cleanLabelText(el.textContent)
+}
+
+function collectRadioFields(
+  container: HTMLElement,
+  fields: Array<FormField>,
+  seen: Set<Element>,
+) {
+  const radios = Array.from(
+    container.querySelectorAll<HTMLInputElement>('input[type="radio"]'),
+  ).filter((r) => !r.disabled)
+
+  const groups = new Map<string, Array<HTMLInputElement>>()
+  for (const radio of radios) {
+    if (seen.has(radio)) continue
+    const key =
+      radio.name || radio.closest('fieldset')?.id || `anon_radio_${groups.size}`
+    const list = groups.get(key) ?? []
+    list.push(radio)
+    groups.set(key, list)
+  }
+
+  for (const [, inputs] of groups) {
+    if (inputs.length === 0) continue
+    inputs.forEach((r) => seen.add(r))
+
+    const fieldset =
+      inputs[0].closest(
+        'fieldset[data-test-form-builder-radio-button-form-component="true"]',
+      ) ?? inputs[0].closest('fieldset')
+
+    const titleEl =
+      fieldset?.querySelector(
+        '[data-test-form-builder-radio-button-form-component__title]',
+      ) ??
+      fieldset?.querySelector('legend') ??
+      inputs[0]
+        .closest('[data-test-form-element]')
+        ?.querySelector('label, legend, span')
+
+    const label =
+      preferVisuallyHiddenText(titleEl ?? null) ??
+      findLabel(inputs[0], container) ??
+      `Choice ${fields.length + 1}`
+
+    const options = inputs.map((inp) => {
+      const forLabel = labelTextForControl(inp, container)
+      return forLabel || inp.value || 'Option'
+    })
+
+    const fieldId = `field_${fields.length}`
+    const anchor = (fieldset as HTMLElement | null) ?? inputs[0]
+    anchor.setAttribute('data-ojk-field', fieldId)
+    inputs.forEach((inp) => {
+      inp.setAttribute('data-ojk-radio-group', fieldId)
+    })
+
+    fields.push({
+      id: fieldId,
+      label,
+      type: 'radio',
+      required: inputs.some((i) => i.required),
+      options,
+      selector: `[data-ojk-field="${fieldId}"]`,
+    })
+  }
+}
+
+function collectCheckboxFields(
+  container: HTMLElement,
+  fields: Array<FormField>,
+  seen: Set<Element>,
+) {
+  const boxes = container.querySelectorAll<HTMLInputElement>(
+    'input[type="checkbox"]',
+  )
+
+  boxes.forEach((el) => {
+    if (seen.has(el) || el.disabled) return
+    seen.add(el)
+
+    // Job-details page alert toggles — skip
+    if (el.getAttribute('role') === 'switch') return
+    if (el.closest('[id*="JobAlert"], [id*="JobDetails_JobAlert"]')) return
+
+    const optionText = labelTextForControl(el, container) ?? 'Checkbox'
+    const questionRoot =
+      el.closest('[data-test-form-element]') ?? el.closest('fieldset')
+    const questionLabel = preferVisuallyHiddenText(
+      questionRoot?.querySelector(
+        'legend, [data-test-form-builder-checkbox-form-component__title], .visually-hidden',
+      ) ?? null,
+    )
+
+    const label =
+      questionLabel && questionLabel !== optionText
+        ? `${questionLabel} [${optionText}]`
+        : optionText
+
+    const fieldId = `field_${fields.length}`
+    el.setAttribute('data-ojk-field', fieldId)
+
+    fields.push({
+      id: fieldId,
+      label,
+      type: 'checkbox',
+      required: el.required,
+      options: ['Yes', 'No'],
+      selector: `[data-ojk-field="${fieldId}"]`,
+      context:
+        el.id === 'follow-company-checkbox' ? 'follow-company' : undefined,
+    })
+  })
+}
+
+function labelTextForControl(
+  el: HTMLInputElement,
+  container: HTMLElement,
+): string | null {
+  if (el.id) {
+    for (const label of [
+      ...container.querySelectorAll('label'),
+      ...document.querySelectorAll('label'),
+    ]) {
+      if (label.htmlFor === el.id || label.getAttribute('for') === el.id) {
+        return (
+          preferVisuallyHiddenText(label) ?? cleanLabelText(label.textContent)
+        )
+      }
+    }
+  }
+  const parentLabel = el.closest('label')
+  if (parentLabel) return preferVisuallyHiddenText(parentLabel)
+  return null
 }
 
 function isVisibleField(el: HTMLElement): boolean {
@@ -791,12 +1161,16 @@ function findLabel(el: HTMLElement, container: HTMLElement): string | null {
     // Match by htmlFor — LinkedIn uses Unicode ids like «rj» where CSS.escape breaks [for=…]
     for (const label of container.querySelectorAll('label')) {
       if (label.htmlFor === id || label.getAttribute('for') === id) {
-        return cleanLabelText(label.textContent)
+        return (
+          preferVisuallyHiddenText(label) ?? cleanLabelText(label.textContent)
+        )
       }
     }
     for (const label of document.querySelectorAll('label')) {
       if (label.htmlFor === id || label.getAttribute('for') === id) {
-        return cleanLabelText(label.textContent)
+        return (
+          preferVisuallyHiddenText(label) ?? cleanLabelText(label.textContent)
+        )
       }
     }
   }
@@ -806,19 +1180,31 @@ function findLabel(el: HTMLElement, container: HTMLElement): string | null {
   const parent = block?.parentElement
   if (parent) {
     const siblingLabel = parent.querySelector(':scope > label')
-    if (siblingLabel) return cleanLabelText(siblingLabel.textContent)
+    if (siblingLabel) {
+      return (
+        preferVisuallyHiddenText(siblingLabel) ??
+        cleanLabelText(siblingLabel.textContent)
+      )
+    }
     const anyLabel = parent.querySelector('label')
     if (anyLabel && parent.contains(el)) {
-      return cleanLabelText(anyLabel.textContent)
+      return (
+        preferVisuallyHiddenText(anyLabel) ??
+        cleanLabelText(anyLabel.textContent)
+      )
     }
   }
 
   const classic = el.closest(
-    'fieldset, .artdeco-text-input--container, [class*="form-field"]',
+    'fieldset, .artdeco-text-input--container, [class*="form-field"], [data-test-form-element]',
   )
   if (classic) {
     const label = classic.querySelector('label, legend')
-    if (label) return cleanLabelText(label.textContent)
+    if (label) {
+      return (
+        preferVisuallyHiddenText(label) ?? cleanLabelText(label.textContent)
+      )
+    }
   }
 
   return null
@@ -858,23 +1244,101 @@ function getSelector(el: HTMLElement): string {
   return el.tagName.toLowerCase()
 }
 
+const YES_PHRASES = [
+  'yes',
+  'y',
+  'true',
+  'agree',
+  'accept',
+  'i agree',
+  'i accept',
+]
+const NO_PHRASES = [
+  'no',
+  'n',
+  'false',
+  'decline',
+  'disagree',
+  'prefer not',
+  'prefer not to say',
+  'do not',
+  "don't",
+]
+
+function normalizeMatchText(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s+]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function isAffirmativeAnswer(value: string): boolean {
+  const v = normalizeMatchText(value)
+  if (NO_PHRASES.some((p) => v === p || v.startsWith(p + ' '))) return false
+  return YES_PHRASES.some((p) => v === p || v.startsWith(p + ' '))
+}
+
 function matchSelectOption(
   el: HTMLSelectElement,
   value: string,
 ): HTMLOptionElement | undefined {
-  const v = value.trim().toLowerCase()
   const options = Array.from(el.options)
-  return (
-    options.find((o) => o.text === value || o.value === value) ??
-    options.find(
-      (o) => o.text.toLowerCase() === v || o.value.toLowerCase() === v,
-    ) ??
+  const v = value.trim()
+  const vn = normalizeMatchText(v)
+
+  const exact =
+    options.find((o) => o.text === v || o.value === v) ??
     options.find(
       (o) =>
-        o.text.toLowerCase().includes(v) ||
-        v.includes(o.text.toLowerCase()) ||
-        (v.length >= 2 && o.value.toLowerCase() === v),
+        normalizeMatchText(o.text) === vn || normalizeMatchText(o.value) === vn,
     )
+  if (exact) return exact
+
+  if (YES_PHRASES.includes(vn)) {
+    const yes = options.find((o) =>
+      YES_PHRASES.includes(normalizeMatchText(o.text)),
+    )
+    if (yes) return yes
+  }
+  if (NO_PHRASES.some((p) => vn === p || vn.includes(p))) {
+    const no = options.find((o) => {
+      const t = normalizeMatchText(o.text)
+      return NO_PHRASES.some((p) => t === p || t.includes(p))
+    })
+    if (no) return no
+  }
+
+  return options.find(
+    (o) =>
+      normalizeMatchText(o.text).includes(vn) ||
+      vn.includes(normalizeMatchText(o.text)) ||
+      (vn.length >= 2 && normalizeMatchText(o.value) === vn),
+  )
+}
+
+function matchRadioInput(
+  inputs: Array<HTMLInputElement>,
+  value: string,
+  container: HTMLElement,
+): HTMLInputElement | undefined {
+  const vn = normalizeMatchText(value)
+  const labeled = inputs.map((inp) => ({
+    inp,
+    text: normalizeMatchText(
+      labelTextForControl(inp, container) ?? inp.value ?? '',
+    ),
+  }))
+
+  return (
+    labeled.find((o) => o.text === vn)?.inp ??
+    labeled.find((o) => o.text.includes(vn) || vn.includes(o.text))?.inp ??
+    (YES_PHRASES.includes(vn)
+      ? labeled.find((o) => YES_PHRASES.includes(o.text))?.inp
+      : undefined) ??
+    (NO_PHRASES.some((p) => vn === p || vn.includes(p))
+      ? labeled.find((o) => NO_PHRASES.some((p) => o.text.includes(p)))?.inp
+      : undefined)
   )
 }
 
@@ -887,14 +1351,82 @@ function setNativeValue(
   el: HTMLInputElement | HTMLTextAreaElement,
   value: string,
 ) {
+  el.focus()
   const proto =
     el.tagName === 'TEXTAREA'
       ? HTMLTextAreaElement.prototype
       : HTMLInputElement.prototype
   const descriptor = Object.getOwnPropertyDescriptor(proto, 'value')
+  descriptor?.set?.call(el, '')
+  el.dispatchEvent(new Event('input', { bubbles: true }))
   descriptor?.set?.call(el, value)
   el.dispatchEvent(new Event('input', { bubbles: true }))
   el.dispatchEvent(new Event('change', { bubbles: true }))
+  el.dispatchEvent(new Event('blur', { bubbles: true }))
+}
+
+/** LinkedIn numeric/years fields reject prose — keep digits (and one decimal). */
+function coerceAnswerForField(field: FormField, value: string): string {
+  let v = value.trim()
+  if (isYearsOrNumericQuestion(field.label)) {
+    const m = v.match(/-?\d+(?:\.\d+)?/)
+    v = m ? m[0] : v.replace(/[^\d.]/g, '')
+  }
+  if (field.maxLength && field.maxLength > 0 && v.length > field.maxLength) {
+    v = v.slice(0, field.maxLength)
+  }
+  return v
+}
+
+function isYearsOrNumericQuestion(label: string): boolean {
+  const l = label.toLowerCase()
+  if (/\b(yes|no)\b/.test(l) && !/\byears?\b/.test(l)) return false
+  return (
+    /\bhow many\b/.test(l) ||
+    /\byears?\b/.test(l) ||
+    /\bmonths?\b/.test(l) ||
+    (/\bexperience\b/.test(l) &&
+      (/\bwith\b/.test(l) || /\bin\b/.test(l) || /\bof\b/.test(l))) ||
+    /\b(gpa|scale of|rating|notice period)\b/.test(l)
+  )
+}
+
+function clickRadioOrCheckbox(
+  input: HTMLInputElement,
+  container: HTMLElement,
+  checked: boolean,
+) {
+  if (input.type === 'checkbox') {
+    if (input.checked === checked) return
+  } else if (input.type === 'radio') {
+    if (input.checked && checked) return
+  }
+
+  let label: HTMLElement | null | undefined = null
+  if (input.id) {
+    try {
+      label = container.querySelector(
+        `label[for="${CSS.escape(input.id)}"]`,
+      ) as HTMLLabelElement | null
+    } catch {
+      label = null
+    }
+    if (!label) {
+      label = Array.from(document.querySelectorAll('label')).find(
+        (l) => l.htmlFor === input.id || l.getAttribute('for') === input.id,
+      )
+    }
+  }
+  if (!label) label = input.closest('label')
+
+  if (label) {
+    label.click()
+  } else {
+    input.click()
+  }
+
+  input.dispatchEvent(new Event('input', { bubbles: true }))
+  input.dispatchEvent(new Event('change', { bubbles: true }))
 }
 
 function applyAnswers(
@@ -910,7 +1442,33 @@ function applyAnswers(
       value = coverLetter
     }
 
-    if (value === undefined) return
+    if (value === undefined || value === null) return
+    value = coerceAnswerForField(field, String(value))
+    if (!value && field.type !== 'checkbox') return
+
+    if (field.type === 'radio') {
+      const inputs = Array.from(
+        modal.querySelectorAll<HTMLInputElement>(
+          `input[type="radio"][data-ojk-radio-group="${field.id}"]`,
+        ),
+      )
+      const matched = matchRadioInput(inputs, value, modal)
+      if (matched) clickRadioOrCheckbox(matched, modal, true)
+      return
+    }
+
+    if (field.type === 'checkbox') {
+      const el = modal.querySelector<HTMLInputElement>(field.selector)
+      if (!el) return
+      // Never auto-check "follow company" unless answer is explicitly affirmative
+      const want = isAffirmativeAnswer(value)
+      if (field.context === 'follow-company' && !want) {
+        if (el.checked) clickRadioOrCheckbox(el, modal, false)
+        return
+      }
+      clickRadioOrCheckbox(el, modal, want)
+      return
+    }
 
     const el = modal.querySelector<
       HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement

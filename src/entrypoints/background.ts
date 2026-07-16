@@ -144,13 +144,16 @@ export default defineBackground(() => {
       const trackId = application.id
 
       try {
-        // 1. Resolve standard fields locally from profile (AI must still be configured)
+        // 1. Resolve standard + years/numeric fields locally from profile
         const localAnswers = resolveFieldsLocally(profile, fields)
 
         // Find fields that still need AI answers
-        const unresolvedFields = fields.filter((f) => !localAnswers[f.id])
+        const unresolvedFields = fields.filter(
+          (f) => !String(localAnswers[f.id] ?? '').trim(),
+        )
         let answers = { ...localAnswers }
         let coverLetter: string | undefined
+        let aiErrorMessage: string | null = null
 
         // 2. Use AI for remaining custom / open-ended questions
         if (unresolvedFields.length > 0) {
@@ -168,7 +171,21 @@ export default defineBackground(() => {
             answers = { ...answers, ...aiAnswers }
           } catch (aiError) {
             console.error('[OpenJobKit] AI generation failed:', aiError)
+            aiErrorMessage =
+              aiError instanceof Error ? aiError.message : String(aiError)
           }
+        }
+
+        // 3. Coerce years/numeric + fill any still-empty years questions from profile
+        answers = finalizeAnswers(profile, fields, answers)
+
+        const stillMissing = unresolvedFields.filter(
+          (f) => f.required && !String(answers[f.id] ?? '').trim(),
+        )
+        if (stillMissing.length > 0 && aiErrorMessage) {
+          throw new Error(
+            `AI could not answer: ${stillMissing.map((f) => f.label).join('; ')}. ${aiErrorMessage}`,
+          )
         }
 
         // 3. Generate cover letter when the form has a cover letter field
@@ -434,6 +451,19 @@ function resolveFieldsLocally(
   for (const field of fields) {
     const label = field.label.toLowerCase()
 
+    // Cached preferred answers (fuzzy label match)
+    const cached = matchCachedAnswer(profile, label)
+    if (cached != null) {
+      answers[field.id] = cached
+      continue
+    }
+
+    // Years / how-many experience (must run before generic "location" etc.)
+    if (isYearsExperienceQuestion(label)) {
+      answers[field.id] = yearsAnswerForQuestion(profile, label)
+      continue
+    }
+
     // First Name
     if (label.includes('first name') || label.includes('given name')) {
       answers[field.id] = profile.firstName
@@ -454,7 +484,8 @@ function resolveFieldsLocally(
         !label.includes('last') &&
         !label.includes('middle') &&
         !label.includes('company') &&
-        !label.includes('employer'))
+        !label.includes('employer') &&
+        !label.includes('how many'))
     ) {
       answers[field.id] = `${profile.firstName} ${profile.lastName}`.trim()
     }
@@ -498,25 +529,74 @@ function resolveFieldsLocally(
     ) {
       answers[field.id] = profile.portfolioUrl || profile.website || ''
     }
-    // Location / City
+    // Location / City (avoid matching "how many years…" custom questions)
     else if (
-      label.includes('location') ||
-      label.includes('city') ||
-      label.includes('reside') ||
-      label.includes('address')
+      !isYearsExperienceQuestion(label) &&
+      (/\blocation\b/.test(label) ||
+        /\bcity\b/.test(label) ||
+        /\breside\b/.test(label) ||
+        /\baddress\b/.test(label))
     ) {
       answers[field.id] = profile.location || ''
+    }
+    // Notice period
+    else if (label.includes('notice') || label.includes('can you join')) {
+      answers[field.id] = profile.noticePeriod || 'Immediately available'
+    }
+    // Salary / CTC / compensation
+    else if (
+      label.includes('salary') ||
+      label.includes('compensation') ||
+      label.includes('ctc') ||
+      (label.includes('pay') && !label.includes('paypal'))
+    ) {
+      answers[field.id] = profile.desiredSalary || 'Open to discussion'
     }
     // Standard questions: Authorized to work
     else if (
       label.includes('authorized to work') ||
       label.includes('legal right to work') ||
-      label.includes('legally authorized')
+      label.includes('legally authorized') ||
+      label.includes('eligible to work')
     ) {
-      answers[field.id] = 'Yes'
+      answers[field.id] = pickYesNo(field, 'Yes')
     }
     // Standard questions: Sponsorship
     else if (label.includes('sponsor') || label.includes('visa')) {
+      answers[field.id] = pickYesNo(field, 'No')
+    }
+    // Relocate
+    else if (label.includes('relocat') || label.includes('willing to move')) {
+      answers[field.id] = pickYesNo(field, 'Yes')
+    }
+    // Veteran status
+    else if (label.includes('veteran') || label.includes('protected veteran')) {
+      answers[field.id] = pickPreferNot(field, 'I am not a protected veteran')
+    }
+    // Disability
+    else if (label.includes('disability') || label.includes('disabled')) {
+      answers[field.id] = pickPreferNot(field, 'No, I do not have a disability')
+    }
+    // Gender (EEO) — prefer decline when present
+    else if (
+      (label.includes('gender') || label.includes('sex')) &&
+      !label.includes('sexual')
+    ) {
+      answers[field.id] = pickPreferNot(field, 'Decline to self-identify')
+    }
+    // Race / ethnicity
+    else if (
+      label.includes('race') ||
+      label.includes('ethnicity') ||
+      label.includes('ethnic')
+    ) {
+      answers[field.id] = pickPreferNot(field, 'Decline to self-identify')
+    }
+    // Follow company checkbox — default opt-out
+    else if (
+      field.context === 'follow-company' ||
+      (label.includes('follow') && label.includes('company'))
+    ) {
       answers[field.id] = 'No'
     }
     // Education: School / Institution
@@ -616,8 +696,7 @@ function resolveFieldsLocally(
     ) {
       const edu = profile.education?.[0]
       const endDate = edu?.endDate || new Date().toISOString().substring(0, 7)
-      const parts = endDate.split('-')
-      const year = parts[0]
+      const year = endDate.split('-')[0]
       if (field.type === 'select' && field.options) {
         answers[field.id] = field.options.find((o) => o.includes(year)) || year
       } else {
@@ -629,9 +708,229 @@ function resolveFieldsLocally(
   return answers
 }
 
+function finalizeAnswers(
+  profile: UserProfile,
+  fields: Array<FormField>,
+  answers: Record<string, string>,
+): Record<string, string> {
+  const out: Record<string, string> = { ...answers }
+
+  for (const field of fields) {
+    let value = out[field.id]
+    if (
+      (!value || !String(value).trim()) &&
+      isYearsExperienceQuestion(field.label.toLowerCase())
+    ) {
+      value = yearsAnswerForQuestion(profile, field.label.toLowerCase())
+    }
+    if (value == null || value === '') continue
+
+    let v = String(value).trim()
+    if (isYearsExperienceQuestion(field.label.toLowerCase())) {
+      const m = v.match(/-?\d+(?:\.\d+)?/)
+      v = m ? m[0] : v.replace(/[^\d.]/g, '')
+    }
+    if (field.maxLength && field.maxLength > 0 && v.length > field.maxLength) {
+      v = v.slice(0, field.maxLength)
+    }
+    out[field.id] = v
+  }
+
+  return out
+}
+
+function matchCachedAnswer(profile: UserProfile, label: string): string | null {
+  const entries = Object.entries(profile.cachedAnswers ?? {})
+  if (entries.length === 0) return null
+
+  let best: { key: string; value: string; score: number } | null = null
+  for (const [key, value] of entries) {
+    const k = key.toLowerCase()
+    if (!value?.trim()) continue
+    if (label.includes(k) || k.includes(label.slice(0, 40))) {
+      const score = Math.min(label.length, k.length)
+      if (!best || score > best.score) best = { key: k, value, score }
+    }
+  }
+
+  // Skill-specific years questions should not use the generic "years of experience" cache alone
+  // when we can compute a better skill-aware number — handled by isYearsExperienceQuestion first.
+  // Only use generic years cache when label is generic.
+  if (best?.key === 'years of experience' && isSkillSpecificYears(label)) {
+    return null
+  }
+
+  return best?.value ?? null
+}
+
+function isSkillSpecificYears(label: string): boolean {
+  return (
+    isYearsExperienceQuestion(label) &&
+    (/\bwith\b/.test(label) ||
+      /\bin\b/.test(label) ||
+      label.includes('(') ||
+      /\b(aws|azure|gcp|linux|python|java|react|docker|kubernetes)\b/.test(
+        label,
+      ))
+  )
+}
+
+function isYearsExperienceQuestion(label: string): boolean {
+  if (
+    /\b(authorized|sponsor|visa|relocat|gender|disability|veteran)\b/.test(
+      label,
+    )
+  ) {
+    return false
+  }
+  return (
+    /\bhow many\b/.test(label) ||
+    (/\byears?\b/.test(label) &&
+      (/\bexperience\b/.test(label) ||
+        /\bwith\b/.test(label) ||
+        /\bwork\b/.test(label))) ||
+    (/\bexperience\b/.test(label) &&
+      (/\bwith\b/.test(label) || /\bin\b/.test(label)) &&
+      !/\b(describe|tell us|summary)\b/.test(label))
+  )
+}
+
+function yearsAnswerForQuestion(profile: UserProfile, label: string): string {
+  const total = estimateTotalYears(profile)
+  const skill = extractSkillHint(label)
+  if (skill) {
+    const matched = findSkill(profile, skill)
+    if (matched) {
+      const fromLevel = skillLevelToYears(matched.level)
+      return String(Math.max(1, Math.min(fromLevel, total)))
+    }
+    // Mentioned in resume/work → use total years; else modest default
+    const blob = [
+      profile.resumeText,
+      profile.summary,
+      ...profile.workExperience.map(
+        (w) => `${w.title} ${w.company} ${w.description}`,
+      ),
+      ...profile.skills.map((s) => s.name),
+    ]
+      .join(' ')
+      .toLowerCase()
+    if (
+      blob.includes(skill) ||
+      skill.split(/\s+/).some((p) => p.length > 2 && blob.includes(p))
+    ) {
+      return String(Math.max(1, total))
+    }
+  }
+  return String(Math.max(1, total))
+}
+
+function extractSkillHint(label: string): string | null {
+  const withMatch = label.match(/\b(?:with|in|using|on)\s+(.+?)(?:\?|$)/i)
+  let raw = withMatch?.[1]?.trim() ?? null
+  if (!raw) return null
+  // Prefer parenthetical acronym: Amazon Web Services (AWS) → aws
+  const paren = raw.match(/\(([^)]+)\)/)
+  if (paren) return paren[1].trim().toLowerCase()
+  raw = raw.replace(/\*$/, '').replace(/\s+/g, ' ').trim()
+  return raw.toLowerCase() || null
+}
+
+function findSkill(profile: UserProfile, hint: string) {
+  const h = hint.toLowerCase()
+  const aliases: Record<string, Array<string>> = {
+    aws: ['aws', 'amazon web services', 'amazon aws'],
+    linux: ['linux', 'unix', 'ubuntu', 'centos'],
+    k8s: ['k8s', 'kubernetes'],
+    gcp: ['gcp', 'google cloud'],
+  }
+  const expanded = new Set<string>([h])
+  for (const [canon, list] of Object.entries(aliases)) {
+    if (list.some((a) => h.includes(a) || a.includes(h))) {
+      list.forEach((a) => expanded.add(a))
+      expanded.add(canon)
+    }
+  }
+
+  return profile.skills.find((s) => {
+    const n = s.name.toLowerCase()
+    return [...expanded].some((a) => n.includes(a) || a.includes(n))
+  })
+}
+
+function skillLevelToYears(
+  level: UserProfile['skills'][number]['level'],
+): number {
+  switch (level) {
+    case 'beginner':
+      return 1
+    case 'intermediate':
+      return 2
+    case 'advanced':
+      return 3
+    case 'expert':
+      return 5
+    default:
+      return 2
+  }
+}
+
+function estimateTotalYears(profile: UserProfile): number {
+  const cached = profile.cachedAnswers?.['years of experience']
+  if (cached) {
+    const m = String(cached).match(/\d+/)
+    if (m) return Math.max(1, parseInt(m[0], 10))
+  }
+
+  let months = 0
+  for (const w of profile.workExperience ?? []) {
+    const start = parseYearMonth(w.startDate)
+    if (!start) continue
+    const end = w.endDate ? parseYearMonth(w.endDate) : new Date()
+    if (!end) continue
+    const diff =
+      (end.getFullYear() - start.getFullYear()) * 12 +
+      (end.getMonth() - start.getMonth())
+    if (diff > 0) months += diff
+  }
+  if (months > 0) return Math.max(1, Math.round(months / 12))
+
+  // Fallback: "2+ years" in summary
+  const summaryYears = profile.summary?.match(/(\d+)\+?\s*years?/i)
+  if (summaryYears) return Math.max(1, parseInt(summaryYears[1], 10))
+
+  return 2
+}
+
+function parseYearMonth(value: string): Date | null {
+  if (!value) return null
+  const m = value.match(/^(\d{4})-(\d{2})/)
+  if (m) return new Date(parseInt(m[1], 10), parseInt(m[2], 10) - 1, 1)
+  const d = new Date(value)
+  return Number.isNaN(d.getTime()) ? null : d
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Option Matching Helper Functions
 // ────────────────────────────────────────────────────────────────────────────
+
+function pickYesNo(field: FormField, prefer: 'Yes' | 'No'): string {
+  if (field.options?.length) {
+    const hit = fuzzyMatchOption(field.options, prefer)
+    if (hit) return hit
+  }
+  return prefer
+}
+
+function pickPreferNot(field: FormField, preferredPhrase: string): string {
+  if (!field.options?.length) return preferredPhrase
+  const decline = field.options.find((o) =>
+    /decline|prefer not|do not wish|don't wish|choose not/i.test(o),
+  )
+  if (decline) return decline
+  const hit = fuzzyMatchOption(field.options, preferredPhrase)
+  return hit || preferredPhrase
+}
 
 function fuzzyMatchOption(options: Array<string>, target: string): string {
   const targetLower = target.toLowerCase()
