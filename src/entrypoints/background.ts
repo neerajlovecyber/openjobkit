@@ -29,6 +29,13 @@ export default defineBackground(() => {
     id: browser.runtime.id,
   })
 
+  // Toolbar click opens the side panel (Jobright-style) instead of a popup.
+  void browser.sidePanel
+    ?.setPanelBehavior({ openPanelOnActionClick: true })
+    .catch((err: unknown) => {
+      console.warn('[OpenJobKit] sidePanel.setPanelBehavior failed:', err)
+    })
+
   const cleanup = onMessage({
     // ── Content script detected a job form ──────────────────────────────────
     DETECT_JOB: async (msg, sender) => {
@@ -76,10 +83,21 @@ export default defineBackground(() => {
         throw new Error(`Application ${applicationId} not found.`)
       }
 
+      const apiKey = settings.ai.apiKey?.trim()
+      if (!apiKey) {
+        const error =
+          'AI is not configured. Add an API key in OpenJobKit Settings → AI before autofill.'
+        await applicationsStorage.update(applicationId, {
+          status: 'failed',
+          error,
+        })
+        throw new Error(error)
+      }
+
       await applicationsStorage.update(applicationId, { status: 'filling' })
 
       try {
-        // 1. Resolve standard fields locally first using profile data (no API key required)
+        // 1. Resolve standard fields locally from profile (AI must still be configured)
         const localAnswers = resolveFieldsLocally(profile, fields)
 
         // Find fields that still need AI answers
@@ -87,39 +105,33 @@ export default defineBackground(() => {
         let answers = { ...localAnswers }
         let coverLetter: string | undefined
 
-        // 2. If we have custom questions left and have an API key, use AI to answer them
+        // 2. Use AI for remaining custom / open-ended questions
         if (unresolvedFields.length > 0) {
-          if (settings.ai.apiKey) {
-            try {
-              const userPrompt = buildFillPrompt(
-                profile,
-                application.job,
-                unresolvedFields,
-              )
-              const aiAnswers = await generateFormAnswers(
-                settings.ai,
-                SYSTEM_PROMPT,
-                userPrompt,
-              )
-              answers = { ...answers, ...aiAnswers }
-            } catch (aiError) {
-              console.error('[OpenJobKit] AI generation failed:', aiError)
-            }
-          } else {
-            console.warn(
-              '[OpenJobKit] No AI API key configured. Custom fields skipped.',
+          try {
+            const userPrompt = buildFillPrompt(
+              profile,
+              application.job,
+              unresolvedFields,
             )
+            const aiAnswers = await generateFormAnswers(
+              settings.ai,
+              SYSTEM_PROMPT,
+              userPrompt,
+            )
+            answers = { ...answers, ...aiAnswers }
+          } catch (aiError) {
+            console.error('[OpenJobKit] AI generation failed:', aiError)
           }
         }
 
-        // 3. Generate cover letter if there's a cover letter field and API key is present
+        // 3. Generate cover letter when the form has a cover letter field
         const hasCoverLetterField = fields.some(
           (f) =>
             f.label.toLowerCase().includes('cover letter') ||
             f.id.toLowerCase().includes('cover'),
         )
 
-        if (hasCoverLetterField && settings.ai.apiKey) {
+        if (hasCoverLetterField) {
           try {
             const clPrompt = buildCoverLetterPrompt(profile, application.job)
             coverLetter = await generateCoverLetter(
@@ -163,6 +175,13 @@ export default defineBackground(() => {
 
     // ── Trigger fill on the active tab's detected form frame ────────────────
     TRIGGER_FILL_ACTIVE_TAB: async () => {
+      const settings = await settingsStorage.get()
+      if (!settings.ai.apiKey?.trim()) {
+        throw new Error(
+          'AI is not configured. Add an API key in OpenJobKit Settings → AI before autofill.',
+        )
+      }
+
       const [tab] = await browser.tabs.query({
         active: true,
         currentWindow: true,
@@ -258,7 +277,9 @@ export default defineBackground(() => {
 })
 
 // ────────────────────────────────────────────────────────────────────────────
-// Local Deterministic Resolver for Core Fields (No API Key Required)
+// Local Deterministic Resolver for Core Fields
+// (Used only after AI is confirmed configured — fills name/email/etc. without
+// burning tokens, then AI handles the remaining open-ended questions.)
 // ────────────────────────────────────────────────────────────────────────────
 
 function resolveFieldsLocally(

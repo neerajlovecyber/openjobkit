@@ -15,7 +15,22 @@ import type { ExtensionMessage } from '@/types/messages'
 export async function sendToBackground<R = void>(
   message: ExtensionMessage,
 ): Promise<R> {
-  return browser.runtime.sendMessage(message) as Promise<R>
+  const response = (await browser.runtime.sendMessage(message)) as
+    | R
+    | { error?: string }
+    | undefined
+
+  if (
+    response &&
+    typeof response === 'object' &&
+    'error' in response &&
+    typeof response.error === 'string' &&
+    response.error
+  ) {
+    throw new Error(response.error)
+  }
+
+  return response as R
 }
 
 /**

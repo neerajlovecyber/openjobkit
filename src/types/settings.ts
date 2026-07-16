@@ -10,7 +10,7 @@ export type ApplyMode =
 export interface AISettings {
   provider: AIProvider
   apiKey: string // Stored in InstantDB (encrypted at rest)
-  model: string // e.g. "gpt-4o", "gemini-1.5-pro"
+  model: string // e.g. "gpt-4o", "gemini-2.5-pro"
   temperature: number // 0–1, default 0.3
   maxTokens: number
 }

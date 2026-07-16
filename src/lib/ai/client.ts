@@ -19,7 +19,7 @@ function getModel(settings: AISettings) {
 
   const modelName =
     settings.model ||
-    (settings.provider === 'openai' ? 'gpt-4o-mini' : 'gemini-1.5-flash')
+    (settings.provider === 'openai' ? 'gpt-4o-mini' : 'gemini-2.5-flash')
   const temp = settings.temperature ?? 0.3
   const maxTokens = settings.maxTokens ?? 2000
 

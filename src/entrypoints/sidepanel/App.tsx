@@ -1,8 +1,13 @@
-import React from 'react'
+import React, { useEffect, useState } from 'react'
 
+import SettingsApp from '@/components/SettingsApp'
 import SignIn from '@/components/SignIn'
 import { db } from '@/lib/db'
+import { sendToBackground } from '@/lib/messaging'
+import { takeSidepanelView } from '@/lib/sidepanel'
+import { activeApplicationsStorage } from '@/lib/storage'
 
+import type { SidepanelView } from '@/lib/sidepanel'
 import type { JobApplication } from '@/types/job'
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -32,23 +37,50 @@ const STATUS_COLORS: Record<JobApplication['status'], string> = {
 }
 
 const STATUS_LABELS: Record<JobApplication['status'], string> = {
-  detected: '👁 Detected',
-  filling: '⚡ Filling',
-  filled: '✍️ Filled',
-  reviewing: '🔍 Reviewing',
-  applied: '✅ Applied',
-  skipped: '⏭ Skipped',
-  failed: '❌ Failed',
-  saved: '🔖 Saved',
+  detected: 'Detected',
+  filling: 'Filling',
+  filled: 'Filled',
+  reviewing: 'Reviewing',
+  applied: 'Applied',
+  skipped: 'Skipped',
+  failed: 'Failed',
+  saved: 'Saved',
 }
+
+const PLATFORM_LABELS: Record<string, string> = {
+  linkedin: 'LinkedIn',
+  indeed: 'Indeed',
+  greenhouse: 'Greenhouse',
+  lever: 'Lever',
+}
+
+const SUPPORTED_PATTERNS = [
+  { pattern: /linkedin\.com\/jobs/i, platform: 'linkedin' },
+  { pattern: /indeed\.com/i, platform: 'indeed' },
+  { pattern: /greenhouse\.io/i, platform: 'greenhouse' },
+  { pattern: /lever\.co/i, platform: 'lever' },
+]
+
+function detectPlatform(url: string): string | null {
+  for (const { pattern, platform } of SUPPORTED_PATTERNS) {
+    if (pattern.test(url)) return platform
+  }
+  return null
+}
+
+type TabState =
+  | { status: 'loading' }
+  | { status: 'unsupported'; url: string }
+  | { status: 'supported'; platform: string; url: string }
+  | { status: 'error'; message: string }
 
 export default function App() {
   const { isLoading: isAuthLoading, user, error: authError } = db.useAuth()
-  const [filter, setFilter] = React.useState<JobApplication['status'] | 'all'>(
-    'all',
-  )
+  const [view, setView] = useState<SidepanelView>('home')
+  const [filter, setFilter] = useState<JobApplication['status'] | 'all'>('all')
+  const [tabState, setTabState] = useState<TabState>({ status: 'loading' })
+  const [fillBusy, setFillBusy] = useState(false)
 
-  // Real-time reactive query — scopes data to user.id
   const { isLoading: isDataLoading, data } = db.useQuery(
     user
       ? {
@@ -59,28 +91,107 @@ export default function App() {
       : null,
   )
 
+  useEffect(() => {
+    void takeSidepanelView().then(setView)
+  }, [])
+
+  useEffect(() => {
+    if (user && view === 'home') {
+      void loadCurrentTab()
+    }
+  }, [user, view])
+
+  async function loadCurrentTab() {
+    try {
+      const [tab] = await browser.tabs.query({
+        active: true,
+        currentWindow: true,
+      })
+      if (!tab?.id) return
+      const url = tab.url ?? ''
+
+      const activeMapping = await activeApplicationsStorage.get(tab.id)
+      if (activeMapping) {
+        const { data: appData } = await db.queryOnce({
+          applications: {
+            $: { where: { appId: activeMapping.applicationId } },
+          },
+        })
+        const app = appData.applications[0]
+        if (app) {
+          const mapped = rowToApp(app)
+          setTabState({
+            status: 'supported',
+            platform: mapped.job.platform,
+            url: mapped.job.url,
+          })
+          try {
+            await browser.tabs.sendMessage(tab.id, { type: 'PING' })
+          } catch {
+            // Ignored
+          }
+          return
+        }
+      }
+
+      const platform = detectPlatform(url)
+      if (platform) {
+        setTabState({ status: 'supported', platform, url })
+        try {
+          await browser.tabs.sendMessage(tab.id, { type: 'PING' })
+        } catch {
+          // Ignored
+        }
+      } else {
+        setTabState({ status: 'unsupported', url })
+      }
+    } catch (e) {
+      setTabState({ status: 'error', message: String(e) })
+    }
+  }
+
+  async function handleFillPage() {
+    setFillBusy(true)
+    try {
+      await sendToBackground({ type: 'TRIGGER_FILL_ACTIVE_TAB' })
+    } catch (e) {
+      const message =
+        e instanceof Error ? e.message : 'Failed to trigger autofill.'
+      setTabState({ status: 'error', message })
+    } finally {
+      setFillBusy(false)
+    }
+  }
+
   if (isAuthLoading) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-[#0f0f13] text-sm text-white/50">
-        Loading authentication state…
+        Loading…
       </div>
     )
   }
 
   if (authError) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-[#0f0f13] text-sm text-red-400">
+      <div className="flex min-h-screen items-center justify-center bg-[#0f0f13] px-4 text-center text-sm text-red-400">
         Auth Error: {authError.message}
       </div>
     )
   }
 
   if (!user) {
-    return <SignIn />
+    return (
+      <div className="min-h-screen bg-[#0f0f13]">
+        <SignIn compact />
+      </div>
+    )
+  }
+
+  if (view === 'settings') {
+    return <SettingsApp embedded onBack={() => setView('home')} />
   }
 
   const applications = data?.applications.map(rowToApp) ?? []
-
   const filtered =
     filter === 'all'
       ? applications
@@ -96,33 +207,54 @@ export default function App() {
 
   return (
     <div className="flex min-h-screen flex-col bg-[#0f0f13] font-[Inter,sans-serif] text-white">
-      {/* Header */}
-      <header className="sticky top-0 z-10 border-b border-white/10 bg-[#0f0f13]/80 px-4 py-4 backdrop-blur">
-        <div className="mb-3 flex items-center gap-2">
-          <div className="flex h-6 w-6 items-center justify-center rounded-md bg-gradient-to-br from-violet-500 to-indigo-600 text-xs font-bold">
+      <header className="sticky top-0 z-10 border-b border-white/10 bg-[#0f0f13]/90 px-4 py-3 backdrop-blur">
+        <div className="mb-3 flex items-center gap-2.5">
+          <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-violet-500 to-indigo-600 text-sm font-bold">
             J
           </div>
-          <span className="text-sm font-semibold tracking-tight">
-            Job Tracker
-          </span>
-          <span className="ml-auto text-xs text-white/40">
+          <div className="min-w-0 flex-1">
+            <p className="text-sm leading-tight font-semibold">OpenJobKit</p>
+            <p className="truncate text-[10px] text-white/40">{user.email}</p>
+          </div>
+          <button
+            type="button"
+            aria-label="Settings"
+            onClick={() => setView('settings')}
+            className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 text-xs text-white/70 transition-colors hover:bg-white/10 hover:text-white"
+          >
+            Settings
+          </button>
+        </div>
+
+        <PageStatus
+          state={tabState}
+          fillBusy={fillBusy}
+          onFill={handleFillPage}
+          onOpenSettings={() => setView('settings')}
+        />
+      </header>
+
+      <div className="border-b border-white/8 px-4 py-2.5">
+        <div className="mb-2 flex items-center justify-between">
+          <p className="text-[11px] font-medium tracking-wider text-white/40 uppercase">
+            Applications
+          </p>
+          <span className="text-[10px] text-white/30">
             {applications.length} total
           </span>
         </div>
-
-        {/* Summary pills */}
         <div className="flex flex-wrap gap-1.5">
           {(
             [
-              ['all', '🗂 All', applications.length],
-              ['applied', '✅', counts.applied ?? 0],
-              ['filled', '✍️', counts.filled ?? 0],
-              ['failed', '❌', counts.failed ?? 0],
+              ['all', 'All', applications.length],
+              ['applied', 'Applied', counts.applied ?? 0],
+              ['filled', 'Filled', counts.filled ?? 0],
+              ['failed', 'Failed', counts.failed ?? 0],
             ] as const
           ).map(([val, label, count]) => (
             <button
               key={val}
-              id={`filter-${val}`}
+              type="button"
               onClick={() => setFilter(val as typeof filter)}
               className={`rounded-full border px-2.5 py-1 text-xs font-medium transition-all ${
                 filter === val
@@ -134,9 +266,8 @@ export default function App() {
             </button>
           ))}
         </div>
-      </header>
+      </div>
 
-      {/* Body */}
       <main className="flex-1 space-y-2 overflow-y-auto px-3 py-3">
         {isDataLoading ? (
           <div className="flex h-40 items-center justify-center text-sm text-white/30">
@@ -148,18 +279,79 @@ export default function App() {
           filtered.map((app) => <ApplicationRow key={app.id} app={app} />)
         )}
       </main>
+    </div>
+  )
+}
 
-      {/* Footer */}
-      <footer className="flex items-center justify-between border-t border-white/10 px-4 py-3">
-        <span className="text-xs text-white/30">OpenJobKit v0.1</span>
-        <button
-          id="open-options"
-          onClick={() => browser.runtime.openOptionsPage()}
-          className="text-xs text-violet-400 transition-colors hover:text-violet-300"
-        >
-          Settings →
-        </button>
-      </footer>
+function PageStatus({
+  state,
+  fillBusy,
+  onFill,
+  onOpenSettings,
+}: {
+  state: TabState
+  fillBusy: boolean
+  onFill: () => void
+  onOpenSettings: () => void
+}) {
+  if (state.status === 'loading') {
+    return (
+      <div className="rounded-xl border border-white/8 bg-white/5 p-3 text-center text-xs text-white/40">
+        Detecting page…
+      </div>
+    )
+  }
+
+  if (state.status === 'unsupported') {
+    return (
+      <div className="rounded-xl border border-white/8 bg-white/5 p-3">
+        <p className="text-center text-xs text-white/50">
+          Not a supported job page
+        </p>
+        <p className="mt-1 text-center text-[11px] text-white/30">
+          Open LinkedIn, Indeed, Greenhouse, or Lever
+        </p>
+      </div>
+    )
+  }
+
+  if (state.status === 'error') {
+    const needsAi = state.message.toLowerCase().includes('api key')
+    return (
+      <div className="rounded-xl border border-red-500/20 bg-red-500/10 p-3">
+        <p className="text-xs text-red-300">{state.message}</p>
+        {needsAi && (
+          <button
+            type="button"
+            onClick={onOpenSettings}
+            className="mt-2 w-full rounded-lg bg-violet-600 py-1.5 text-xs font-semibold text-white hover:bg-violet-500"
+          >
+            Open AI Settings
+          </button>
+        )}
+      </div>
+    )
+  }
+
+  const platformLabel = PLATFORM_LABELS[state.platform] ?? state.platform
+
+  return (
+    <div className="rounded-xl border border-white/8 bg-white/5 p-3">
+      <div className="mb-2 flex items-center gap-2">
+        <span className="h-2 w-2 animate-pulse rounded-full bg-green-400" />
+        <span className="text-xs font-medium text-white/80">
+          {platformLabel} detected
+        </span>
+      </div>
+      <p className="mb-3 truncate text-[11px] text-white/40">{state.url}</p>
+      <button
+        type="button"
+        disabled={fillBusy}
+        onClick={onFill}
+        className="w-full rounded-lg bg-gradient-to-r from-violet-600 to-indigo-600 py-2 text-sm font-semibold text-white transition-all hover:from-violet-500 hover:to-indigo-500 disabled:opacity-60"
+      >
+        {fillBusy ? 'Filling…' : 'Fill This Page'}
+      </button>
     </div>
   )
 }
@@ -172,7 +364,7 @@ function ApplicationRow({ app }: { app: JobApplication }) {
       : null
 
   return (
-    <div className="group rounded-xl border border-white/8 bg-white/5 p-3 transition-colors hover:bg-white/8">
+    <div className="rounded-xl border border-white/8 bg-white/5 p-3 transition-colors hover:bg-white/8">
       <div className="mb-2 flex items-start justify-between gap-2">
         <div className="min-w-0 flex-1">
           <p className="truncate text-sm leading-tight font-medium">
@@ -217,14 +409,8 @@ function ApplicationRow({ app }: { app: JobApplication }) {
 function EmptyState({ filter }: { filter: string }) {
   return (
     <div className="flex h-52 flex-col items-center justify-center gap-3 px-6 text-center">
-      <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-white/10 bg-white/5 text-2xl">
-        {filter === 'all'
-          ? '🎯'
-          : filter === 'applied'
-            ? '✅'
-            : filter === 'failed'
-              ? '❌'
-              : '📝'}
+      <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-white/10 bg-white/5 text-lg text-white/40">
+        ∅
       </div>
       <div>
         <p className="text-sm font-semibold">No applications found</p>
