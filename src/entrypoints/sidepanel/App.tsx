@@ -65,9 +65,15 @@ function detectPlatform(url: string): string | null {
   return null
 }
 
+/** LinkedIn (and similar) bounce unauthenticated users off /jobs → login. */
+function isAuthWallUrl(url: string): boolean {
+  return /linkedin\.com\/(login|uas\/login|checkpoint|authwall)/i.test(url)
+}
+
 type TabState =
   | { status: 'loading' }
   | { status: 'unsupported'; url: string }
+  | { status: 'needs_login'; url: string; site: string }
   | { status: 'supported'; platform: string; url: string }
   | { status: 'error'; message: string }
 
@@ -122,6 +128,11 @@ export default function App() {
           }
           return
         }
+      }
+
+      if (isAuthWallUrl(url)) {
+        setTabState({ status: 'needs_login', url, site: 'LinkedIn' })
+        return
       }
 
       const platform = detectPlatform(url)
@@ -253,7 +264,11 @@ export default function App() {
 
         <button
           type="button"
-          disabled={fillBusy || tabState.status === 'unsupported'}
+          disabled={
+            fillBusy ||
+            tabState.status === 'unsupported' ||
+            tabState.status === 'needs_login'
+          }
           onClick={() => void handleFillPage()}
           className="w-full rounded-xl bg-gradient-to-r from-violet-600 to-indigo-600 py-2.5 text-sm font-semibold text-white shadow-lg shadow-violet-600/20 transition-all hover:from-violet-500 hover:to-indigo-500 disabled:cursor-not-allowed disabled:opacity-45 disabled:shadow-none"
         >
@@ -357,11 +372,29 @@ function PageBanner({ state }: { state: TabState }) {
     )
   }
 
+  if (state.status === 'needs_login') {
+    return (
+      <div className="rounded-lg border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-xs text-amber-100/90">
+        Log in to {state.site} in this browser window, then open the job again.
+      </div>
+    )
+  }
+
   if (state.status === 'unsupported') {
     return (
-      <div className="flex items-center justify-between gap-2 rounded-lg border border-white/8 bg-white/5 px-3 py-2 text-xs">
-        <span className="text-white/60">Autofill not supported here</span>
-        <span className="shrink-0 text-white/30">Open a job page</span>
+      <div className="flex flex-col gap-0.5 rounded-lg border border-white/8 bg-white/5 px-3 py-2 text-xs">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-white/60">Autofill not supported here</span>
+          <span className="shrink-0 text-white/30">Open a job page</span>
+        </div>
+        {state.url ? (
+          <span
+            className="truncate text-[10px] text-white/25"
+            title={state.url}
+          >
+            {state.url}
+          </span>
+        ) : null}
       </div>
     )
   }

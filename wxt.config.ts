@@ -18,8 +18,11 @@ export default defineConfig({
   srcDir: 'src',
   modules: ['@wxt-dev/module-react'],
   webExt: {
-    // Persists profile changes, tabs, and extensions across dev restarts.
-    // This stops Chrome from clearing the extension profile on Vite rebuild.
+    // Dedicated persistent Chrome profile for `bun dev` (not your daily Chrome).
+    // Login to LinkedIn once here — cookies survive restarts. Do NOT point this
+    // at your real Chrome User Data while Chrome is open (profile lock).
+    // Windows: path must be absolute (see WXT browser-startup docs).
+    chromiumProfile: path.resolve(__dirname, '.wxt/chrome-data'),
     keepProfileChanges: true,
   },
 

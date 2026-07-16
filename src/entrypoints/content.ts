@@ -4,10 +4,13 @@ import { initLinkedin } from './content/linkedin'
 
 export default defineContentScript({
   matches: [
+    // Bare linkedin.com AND *.linkedin.com — Chrome's `*.` pattern requires a subdomain
+    '*://linkedin.com/jobs/*',
     '*://*.linkedin.com/jobs/*',
     '*://job-boards.greenhouse.io/*',
     '*://boards.greenhouse.io/*',
     '*://*.greenhouse.io/*',
+    '*://indeed.com/*',
     '*://*.indeed.com/*',
   ],
   allFrames: true,

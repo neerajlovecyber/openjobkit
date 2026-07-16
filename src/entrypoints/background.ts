@@ -77,7 +77,7 @@ export default defineBackground(() => {
 
     // ── Content script requests AI fill for a job form ──────────────────────
     FILL_JOB: async (msg, sender) => {
-      const { applicationId, fields } = msg.payload
+      const { applicationId, fields, job: jobSnapshot } = msg.payload
 
       const [profile, settings] = await Promise.all([
         profileStorage.get(),
@@ -91,33 +91,57 @@ export default defineBackground(() => {
         )
       }
 
-      // Resolve job: InstantDB record, or ephemeral tab mapping from DETECT_JOB
+      // Resolve job: InstantDB record, ephemeral tab mapping, or payload snapshot
       let application = await applicationsStorage.getById(applicationId)
       const active =
         sender.tab?.id != null
           ? await activeApplicationsStorage.get(sender.tab.id)
           : null
-      const jobFromSession =
-        active?.applicationId === applicationId ? active.job : null
+
+      // Prefer session job even when applicationId drifted (common after re-DETECT)
+      const jobFromSession = active?.job ?? null
+      const resolvedId = active?.applicationId ?? applicationId
 
       if (!application) {
-        if (!jobFromSession) {
+        const job =
+          jobFromSession ??
+          (jobSnapshot
+            ? {
+                ...jobSnapshot,
+                id: crypto.randomUUID(),
+                detectedAt: new Date().toISOString(),
+              }
+            : null)
+
+        if (!job) {
           throw new Error(
-            'No job context for this page. Refresh and try autofill again.',
+            'No job context for this page. Open the job, click Apply, then Autofill again.',
           )
         }
+
         application = {
-          id: applicationId,
-          job: jobFromSession,
+          id: resolvedId,
+          job,
           status: 'filling',
         }
-        // Persist only when the user actually runs autofill
+
+        // Refresh tab session so later steps keep working
+        if (sender.tab?.id != null) {
+          await activeApplicationsStorage.set(sender.tab.id, {
+            applicationId: resolvedId,
+            frameId: sender.frameId ?? 0,
+            job: application.job,
+          })
+        }
+
         if (settings.trackApplications) {
           await applicationsStorage.add(application)
         }
       } else if (settings.trackApplications) {
-        await applicationsStorage.update(applicationId, { status: 'filling' })
+        await applicationsStorage.update(application.id, { status: 'filling' })
       }
+
+      const trackId = application.id
 
       try {
         // 1. Resolve standard fields locally from profile (AI must still be configured)
@@ -171,7 +195,7 @@ export default defineBackground(() => {
         }
 
         if (settings.trackApplications) {
-          await applicationsStorage.update(applicationId, {
+          await applicationsStorage.update(trackId, {
             status: 'filled',
             aiGeneratedAnswers: answers,
             coverLetter,
@@ -181,15 +205,15 @@ export default defineBackground(() => {
         return { answers, coverLetter }
       } catch (error) {
         if (settings.trackApplications) {
-          const existing = await applicationsStorage.getById(applicationId)
+          const existing = await applicationsStorage.getById(trackId)
           if (existing) {
-            await applicationsStorage.update(applicationId, {
+            await applicationsStorage.update(trackId, {
               status: 'failed',
               error: String(error),
             })
           } else if (jobFromSession || application.job) {
             await applicationsStorage.add({
-              id: applicationId,
+              id: trackId,
               job: jobFromSession ?? application.job,
               status: 'failed',
               error: String(error),
@@ -292,88 +316,101 @@ export default defineBackground(() => {
         active: true,
         currentWindow: true,
       })
-      if (!tab?.id) return
+      if (!tab?.id) {
+        throw new Error('No active tab found. Focus a job page and try again.')
+      }
+
+      if (!tab.url || /^(chrome|edge|about|chrome-extension):/i.test(tab.url)) {
+        throw new Error(
+          'Switch to a LinkedIn / Greenhouse job tab, then click Autofill.',
+        )
+      }
 
       let active = await activeApplicationsStorage.get(tab.id)
 
-      // If no mapping exists (e.g. extension just reloaded and script context was lost),
-      // try to dynamically inject the content script on-demand.
-      if (!active) {
+      // Ask the page to register / open Easy Apply even if mapping is missing
+      const pingOrInject = async () => {
         try {
-          console.log(
-            '[OpenJobKit] No active application mapping found. Injecting content script on-demand...',
-          )
+          await browser.tabs.sendMessage(tab.id!, { type: 'PING' })
+        } catch {
+          console.log('[OpenJobKit] Injecting content script on-demand...')
           await browser.scripting.executeScript({
-            target: { tabId: tab.id },
+            target: { tabId: tab.id! },
             files: ['/content-scripts/content.js'],
           })
-          // Wait briefly for the script to load and register the form
-          await new Promise((resolve) => setTimeout(resolve, 300))
-          active = await activeApplicationsStorage.get(tab.id)
-        } catch (err) {
-          console.error(
-            '[OpenJobKit] Failed to inject content script on-demand:',
-            err,
-          )
+          await new Promise((resolve) => setTimeout(resolve, 400))
+          await browser.tabs.sendMessage(tab.id!, { type: 'PING' })
         }
+        await new Promise((resolve) => setTimeout(resolve, 400))
+        return activeApplicationsStorage.get(tab.id!)
       }
 
       if (!active) {
-        console.warn(
-          '[OpenJobKit] No active application detected for tab:',
-          tab.id,
-        )
-        return
+        active = await pingOrInject()
       }
 
-      // Send TRIGGER_FILL to the content script in the correct frame
-      try {
-        await browser.tabs.sendMessage(
-          tab.id,
+      if (!active) {
+        throw new Error(
+          'No Easy Apply form on this page. Open a job, click Easy Apply, then Autofill again.',
+        )
+      }
+
+      const sendFill = async (frameId?: number) => {
+        const response = (await browser.tabs.sendMessage(
+          tab.id!,
           {
             type: 'TRIGGER_FILL',
-            payload: { applicationId: active.applicationId },
+            payload: { applicationId: active!.applicationId },
           },
-          { frameId: active.frameId },
-        )
+          frameId != null ? { frameId } : undefined,
+        )) as { error?: string; ok?: boolean } | undefined
+
+        if (response && typeof response === 'object' && response.error) {
+          throw new Error(response.error)
+        }
+        return response
+      }
+
+      // LinkedIn Easy Apply lives in the top frame; stale iframe frameIds break fill
+      const preferMainFrame = /linkedin\.com/i.test(tab.url ?? '')
+      const primaryFrame = preferMainFrame ? 0 : active.frameId
+
+      try {
+        await sendFill(primaryFrame)
       } catch (err) {
-        // If the context is invalidated / orphaned, force a re-injection
-        console.warn(
-          '[OpenJobKit] Message failed, re-injecting content script...',
-          err,
-        )
+        console.warn('[OpenJobKit] Fill message failed, re-injecting…', err)
+        active = (await pingOrInject()) ?? active
+        if (!active) {
+          throw new Error(
+            'Could not reach the job page. Refresh LinkedIn and try again.',
+          )
+        }
         try {
-          await browser.scripting.executeScript({
-            target: { tabId: tab.id },
-            files: ['/content-scripts/content.js'],
-          })
-          // Wait briefly, get the fresh mapping, and re-send
-          await new Promise((resolve) => setTimeout(resolve, 300))
-          const freshActive = await activeApplicationsStorage.get(tab.id)
-          if (freshActive) {
-            await browser.tabs.sendMessage(
-              tab.id,
-              {
-                type: 'TRIGGER_FILL',
-                payload: { applicationId: freshActive.applicationId },
-              },
-              { frameId: freshActive.frameId },
+          await sendFill(preferMainFrame ? 0 : active.frameId)
+        } catch (retryErr) {
+          try {
+            await sendFill(undefined)
+          } catch {
+            throw new Error(
+              retryErr instanceof Error
+                ? retryErr.message
+                : 'Autofill failed. Open Easy Apply on the job, then try again.',
             )
           }
-        } catch (injectErr) {
-          console.error('[OpenJobKit] Force re-injection failed:', injectErr)
         }
       }
     },
   })
 
-  // Cleanup active mappings when tab is closed or reloaded
+  // Cleanup active mappings when tab is closed or navigates to a new URL.
+  // Do NOT clear on status==='loading' — LinkedIn SPA / Easy Apply triggers that
+  // and wiped job context mid-fill.
   browser.tabs.onRemoved.addListener((tabId) => {
     void activeApplicationsStorage.remove(tabId)
   })
 
   browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
-    if (changeInfo.status === 'loading') {
+    if (changeInfo.url) {
       void activeApplicationsStorage.remove(tabId)
     }
   })
@@ -425,12 +462,22 @@ function resolveFieldsLocally(
     else if (label.includes('email') || label.includes('e-mail')) {
       answers[field.id] = profile.email
     }
+    // Phone country code (must run before generic phone)
+    else if (
+      label.includes('country code') ||
+      label.includes('phone country') ||
+      label.includes('dialing code')
+    ) {
+      const code = profile.phoneCountryCode?.trim() || 'India (+91)'
+      answers[field.id] = code
+    }
     // Phone
     else if (
-      label.includes('phone') ||
-      label.includes('mobile') ||
-      label.includes('telephone') ||
-      label.includes('contact number')
+      (label.includes('phone') ||
+        label.includes('mobile') ||
+        label.includes('telephone') ||
+        label.includes('contact number')) &&
+      !label.includes('country')
     ) {
       answers[field.id] = profile.phone
     }

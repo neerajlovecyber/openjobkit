@@ -22,6 +22,8 @@ export interface FillJobMessage {
   payload: {
     applicationId: string
     fields: Array<FormField>
+    /** Optional job snapshot so fill still works if tab session was cleared */
+    job?: Omit<JobListing, 'id' | 'detectedAt'>
   }
 }
 
