@@ -6,7 +6,7 @@
 //   3. Return filled answers back to the content script
 //   4. Track applications in InstantDB (local-first, auto cloud sync)
 
-import { createAIClient } from '@/lib/ai/client'
+import { generateFormAnswers, generateCoverLetter } from '@/lib/ai/client'
 import {
   SYSTEM_PROMPT,
   buildFillPrompt,
@@ -91,20 +91,16 @@ export default defineBackground(() => {
         if (unresolvedFields.length > 0) {
           if (settings.ai.apiKey) {
             try {
-              const aiClient = createAIClient(settings.ai)
               const userPrompt = buildFillPrompt(
                 profile,
                 application.job,
                 unresolvedFields,
               )
-              const response = await aiClient.complete(
+              const aiAnswers = await generateFormAnswers(
+                settings.ai,
                 SYSTEM_PROMPT,
                 userPrompt,
               )
-              const aiAnswers = JSON.parse(response.content) as Record<
-                string,
-                string
-              >
               answers = { ...answers, ...aiAnswers }
             } catch (aiError) {
               console.error('[OpenJobKit] AI generation failed:', aiError)
@@ -125,10 +121,12 @@ export default defineBackground(() => {
 
         if (hasCoverLetterField && settings.ai.apiKey) {
           try {
-            const aiClient = createAIClient(settings.ai)
             const clPrompt = buildCoverLetterPrompt(profile, application.job)
-            const clResponse = await aiClient.complete(SYSTEM_PROMPT, clPrompt)
-            coverLetter = clResponse.content
+            coverLetter = await generateCoverLetter(
+              settings.ai,
+              SYSTEM_PROMPT,
+              clPrompt,
+            )
           } catch (clError) {
             console.error(
               '[OpenJobKit] Cover letter generation failed:',

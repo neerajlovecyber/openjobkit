@@ -10,13 +10,25 @@
 
 import { id as instantId } from '@instantdb/react'
 
-import { db, USER_ID } from '@/lib/db'
+import { db } from '@/lib/db'
 import { DEMO_PROFILE } from '@/lib/demo-profile'
 import { DEFAULT_SETTINGS } from '@/types/settings'
 
 import type { JobApplication } from '@/types/job'
 import type { UserProfile } from '@/types/profile'
 import type { UserSettings } from '@/types/settings'
+
+// ────────────────────────────────────────────────────────────────────────────
+// Helper: get the current authenticated user's ID
+// ────────────────────────────────────────────────────────────────────────────
+
+export async function getUserId(): Promise<string> {
+  const user = await db.getAuth()
+  if (!user) {
+    throw new Error('Unauthenticated')
+  }
+  return user.id
+}
 
 // ────────────────────────────────────────────────────────────────────────────
 // Helper: map InstantDB application row → JobApplication
@@ -43,20 +55,22 @@ function rowToApp(row: any): JobApplication {
 
 export const profileStorage = {
   get: async (): Promise<UserProfile> => {
+    const userId = await getUserId()
     const { data } = await db.queryOnce({
-      profiles: { $: { where: { userId: USER_ID } } },
+      profiles: { $: { where: { userId } } },
     })
     return (data.profiles[0]?.data as unknown as UserProfile) ?? DEMO_PROFILE
   },
 
   set: async (profile: UserProfile): Promise<void> => {
+    const userId = await getUserId()
     const { data } = await db.queryOnce({
-      profiles: { $: { where: { userId: USER_ID } } },
+      profiles: { $: { where: { userId } } },
     })
     const recordId = data.profiles[0]?.id ?? instantId()
     await db.transact(
       db.tx.profiles[recordId].update({
-        userId: USER_ID,
+        userId,
         data: profile as unknown as Record<string, unknown>,
         updatedAt: Date.now(),
       }),
@@ -75,8 +89,9 @@ export const profileStorage = {
 
 export const settingsStorage = {
   get: async (): Promise<UserSettings> => {
+    const userId = await getUserId()
     const { data } = await db.queryOnce({
-      settings: { $: { where: { userId: USER_ID } } },
+      settings: { $: { where: { userId } } },
     })
     const stored = data.settings[0]?.data as unknown as UserSettings | null
     if (!stored) return DEFAULT_SETTINGS
@@ -92,13 +107,14 @@ export const settingsStorage = {
   },
 
   set: async (settings: UserSettings): Promise<void> => {
+    const userId = await getUserId()
     const { data } = await db.queryOnce({
-      settings: { $: { where: { userId: USER_ID } } },
+      settings: { $: { where: { userId } } },
     })
     const recordId = data.settings[0]?.id ?? instantId()
     await db.transact(
       db.tx.settings[recordId].update({
-        userId: USER_ID,
+        userId,
         data: settings as unknown as Record<string, unknown>,
         updatedAt: Date.now(),
       }),
@@ -128,9 +144,10 @@ export const settingsStorage = {
 
 export const applicationsStorage = {
   getAll: async (): Promise<Array<JobApplication>> => {
+    const userId = await getUserId()
     const { data } = await db.queryOnce({
       applications: {
-        $: { where: { userId: USER_ID }, order: { updatedAt: 'desc' } },
+        $: { where: { userId }, order: { updatedAt: 'desc' } },
       },
     })
     return data.applications.map(rowToApp)
@@ -144,12 +161,13 @@ export const applicationsStorage = {
   },
 
   add: async (application: JobApplication): Promise<void> => {
+    const userId = await getUserId()
     const settings = await settingsStorage.get()
 
     // Enforce the history cap: delete the oldest record when at limit
     const { data: existing } = await db.queryOnce({
       applications: {
-        $: { where: { userId: USER_ID }, order: { updatedAt: 'asc' } },
+        $: { where: { userId }, order: { updatedAt: 'asc' } },
       },
     })
     if (existing.applications.length >= settings.maxHistoryItems) {
@@ -161,7 +179,7 @@ export const applicationsStorage = {
 
     await db.transact(
       db.tx.applications[instantId()].update({
-        userId: USER_ID,
+        userId,
         appId: application.id,
         job: application.job as unknown as Record<string, unknown>,
         status: application.status,
@@ -189,7 +207,6 @@ export const applicationsStorage = {
     const merged = { ...rowToApp(existing), ...partial }
     await db.transact(
       db.tx.applications[existing.id].update({
-        userId: USER_ID,
         appId: merged.id,
         job: merged.job as unknown as Record<string, unknown>,
         status: merged.status,
@@ -215,8 +232,9 @@ export const applicationsStorage = {
   },
 
   clear: async (): Promise<void> => {
+    const userId = await getUserId()
     const { data } = await db.queryOnce({
-      applications: { $: { where: { userId: USER_ID } } },
+      applications: { $: { where: { userId } } },
     })
     if (data.applications.length === 0) return
     await db.transact(

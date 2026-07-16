@@ -1,6 +1,7 @@
 import React from 'react'
 
-import { db, USER_ID } from '@/lib/db'
+import SignIn from '@/components/SignIn'
+import { db } from '@/lib/db'
 
 import type { JobApplication } from '@/types/job'
 
@@ -42,17 +43,41 @@ const STATUS_LABELS: Record<JobApplication['status'], string> = {
 }
 
 export default function App() {
-  // Real-time reactive query — updates the moment the background SW writes
-  // a new application or changes a status. No polling, no messaging needed.
-  const { isLoading, data } = db.useQuery({
-    applications: {
-      $: { where: { userId: USER_ID }, order: { updatedAt: 'desc' } },
-    },
-  })
-
+  const { isLoading: isAuthLoading, user, error: authError } = db.useAuth()
   const [filter, setFilter] = React.useState<JobApplication['status'] | 'all'>(
     'all',
   )
+
+  // Real-time reactive query — scopes data to user.id
+  const { isLoading: isDataLoading, data } = db.useQuery(
+    user
+      ? {
+          applications: {
+            $: { where: { userId: user.id }, order: { updatedAt: 'desc' } },
+          },
+        }
+      : null,
+  )
+
+  if (isAuthLoading) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-[#0f0f13] text-sm text-white/50">
+        Loading authentication state…
+      </div>
+    )
+  }
+
+  if (authError) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-[#0f0f13] text-sm text-red-400">
+        Auth Error: {authError.message}
+      </div>
+    )
+  }
+
+  if (!user) {
+    return <SignIn />
+  }
 
   const applications = data?.applications.map(rowToApp) ?? []
 
@@ -113,7 +138,7 @@ export default function App() {
 
       {/* Body */}
       <main className="flex-1 space-y-2 overflow-y-auto px-3 py-3">
-        {isLoading ? (
+        {isDataLoading ? (
           <div className="flex h-40 items-center justify-center text-sm text-white/30">
             Loading…
           </div>
@@ -199,16 +224,14 @@ function EmptyState({ filter }: { filter: string }) {
             ? '✅'
             : filter === 'failed'
               ? '❌'
-              : '📋'}
+              : '📝'}
       </div>
       <div>
-        <p className="text-sm font-medium text-white/70">
-          {filter === 'all' ? 'No jobs tracked yet' : `No ${filter} jobs`}
-        </p>
+        <p className="text-sm font-semibold">No applications found</p>
         <p className="mt-1 text-xs text-white/30">
           {filter === 'all'
-            ? 'Visit a job page and click the ✨ Auto-Fill button'
-            : 'Jobs will appear here as you use the extension'}
+            ? 'Start applying to jobs to see tracker cards here.'
+            : `No jobs marked as '${filter}' currently.`}
         </p>
       </div>
     </div>
@@ -216,11 +239,14 @@ function EmptyState({ filter }: { filter: string }) {
 }
 
 function formatTimeAgo(date: Date): string {
-  const diff = Date.now() - date.getTime()
-  const mins = Math.floor(diff / 60000)
-  if (mins < 1) return 'just now'
-  if (mins < 60) return `${mins}m ago`
-  const hrs = Math.floor(mins / 60)
-  if (hrs < 24) return `${hrs}h ago`
-  return `${Math.floor(hrs / 24)}d ago`
+  const diffMs = Date.now() - date.getTime()
+  const diffSec = Math.floor(diffMs / 1000)
+  const diffMin = Math.floor(diffSec / 60)
+  const diffHour = Math.floor(diffMin / 60)
+  const diffDay = Math.floor(diffHour / 24)
+
+  if (diffSec < 60) return 'just now'
+  if (diffMin < 60) return `${diffMin}m ago`
+  if (diffHour < 24) return `${diffHour}h ago`
+  return `${diffDay}d ago`
 }

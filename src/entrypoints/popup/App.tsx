@@ -1,6 +1,7 @@
-import React from 'react'
+import React, { useEffect, useState } from 'react'
 
-import { db, USER_ID } from '@/lib/db'
+import SignIn from '@/components/SignIn'
+import { db } from '@/lib/db'
 import { sendToBackground } from '@/lib/messaging'
 import { activeApplicationsStorage } from '@/lib/storage'
 
@@ -44,21 +45,30 @@ function rowToApp(row: any): JobApplication {
 }
 
 export default function App() {
-  const [tabState, setTabState] = React.useState<TabState>({
-    status: 'loading',
-  })
+  const { isLoading: isAuthLoading, user, error: authError } = db.useAuth()
+  const [tabState, setTabState] = useState<TabState>({ status: 'loading' })
 
-  // Reactive — updates in real-time as background SW writes new apps
-  const { data } = db.useQuery({
-    applications: {
-      $: { where: { userId: USER_ID }, order: { updatedAt: 'desc' }, limit: 3 },
-    },
-  })
+  // Reactive query — scopes data to the authenticated user ID
+  const { data } = db.useQuery(
+    user
+      ? {
+          applications: {
+            $: {
+              where: { userId: user.id },
+              order: { updatedAt: 'desc' },
+              limit: 3,
+            },
+          },
+        }
+      : null,
+  )
   const recentApps = data?.applications.map(rowToApp) ?? []
 
-  React.useEffect(() => {
-    void loadCurrentTab()
-  }, [])
+  useEffect(() => {
+    if (user) {
+      void loadCurrentTab()
+    }
+  }, [user])
 
   async function loadCurrentTab() {
     try {
@@ -72,7 +82,7 @@ export default function App() {
       // Check if we already have a detected job form for this tab
       const activeMapping = await activeApplicationsStorage.get(tab.id)
       if (activeMapping) {
-        // We have a mapping — look up the app to get platform + url from its job data
+        // Look up the app details from the cloud store
         const { data: appData } = await db.queryOnce({
           applications: {
             $: { where: { appId: activeMapping.applicationId } },
@@ -120,6 +130,32 @@ export default function App() {
     }
   }
 
+  // ── Render States ──────────────────────────────────────────────────────────
+
+  if (isAuthLoading) {
+    return (
+      <div className="w-80 bg-[#0f0f13] px-4 py-6 text-center font-[Inter,sans-serif] text-xs text-white/50">
+        Loading authentication state…
+      </div>
+    )
+  }
+
+  if (authError) {
+    return (
+      <div className="w-80 bg-[#0f0f13] px-4 py-6 text-center font-[Inter,sans-serif] text-xs text-red-400">
+        Auth Error: {authError.message}
+      </div>
+    )
+  }
+
+  if (!user) {
+    return (
+      <div className="w-80 bg-[#0f0f13] py-2">
+        <SignIn compact />
+      </div>
+    )
+  }
+
   return (
     <div className="w-80 bg-[#0f0f13] font-[Inter,sans-serif] text-white">
       {/* Header */}
@@ -129,10 +165,9 @@ export default function App() {
         </div>
         <div>
           <p className="text-sm leading-tight font-semibold">OpenJobKit</p>
-          <p className="text-[11px] text-white/40">AI Job Assistant</p>
+          <p className="text-[10px] text-white/40">{user.email}</p>
         </div>
         <button
-          id="open-sidepanel"
           onClick={() => browser.runtime.openOptionsPage()}
           className="ml-auto text-[11px] text-white/40 transition-colors hover:text-white/70"
         >

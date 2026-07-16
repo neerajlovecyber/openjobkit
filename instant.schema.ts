@@ -33,7 +33,12 @@ const _schema = i.schema({
       updatedAt: i.date().indexed(),
     }),
   },
-  links: {},
+  links: {
+    profileResume: {
+      forward: { on: 'profiles', has: 'one', label: 'resumeFile' },
+      reverse: { on: '$files', has: 'many', label: 'profiles' },
+    },
+  },
   rooms: {},
 })
 

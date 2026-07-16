@@ -14,9 +14,4 @@ const APP_ID =
   (import.meta.env.VITE_INSTANT_APP_ID as string) ||
   '1e6712fa-9b64-4e28-8145-4c883bd308b7'
 
-// Namespace for all user data. Use a unique value (e.g. email) for
-// multi-device sync. Changing this in options will isolate data to a new
-// namespace — useful for separating work/personal profiles.
-export const USER_ID = 'default'
-
 export const db = init({ appId: APP_ID, schema })
