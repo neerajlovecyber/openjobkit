@@ -21,10 +21,11 @@ Guidelines:
 
 Critical answer formats (LinkedIn Easy Apply validation is strict):
 1. Years of experience / duration / numeric questions → return ONLY a number string like "2" or "3". Never write "2 years" or a sentence.
-2. Yes/No questions → return ONLY "Yes" or "No" (or an exact option from the list).
-3. Short text with a character limit → stay under the limit; prefer a number or a few words.
-4. Do not repeat the question in the answer.
-5. For select/radio, return one of the provided options exactly as written.`
+2. Notice period / joining time → return ONLY a number. Use days unless the question says weeks or months. "Immediately available" → "0". Example: "30" for 30 days.
+3. Yes/No questions → return ONLY "Yes" or "No" (or an exact option from the list).
+4. Short text with a character limit → stay under the limit; prefer a number or a few words.
+5. Do not repeat the question in the answer.
+6. For select/radio, return one of the provided options exactly as written.`
 
 // ────────────────────────────────────────────────────────────────────────────
 // Fill Fields Prompt
@@ -126,6 +127,7 @@ ${fieldList}
 
 Return a JSON object where each key is a field ID and each value is the answer string.
 For years-of-experience / "how many years" questions: value MUST be digits only (example: "2").
+For notice period / joining questions: value MUST be digits only (days by default; "0" if immediate). Never write "Immediately available".
 For select/radio fields, return one of the provided options exactly as written.
 For checkbox fields, return "Yes" or "No".
 For file fields, return an empty string (cannot fill files automatically).

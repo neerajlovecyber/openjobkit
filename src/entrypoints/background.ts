@@ -12,6 +12,12 @@ import {
   buildFillPrompt,
   buildCoverLetterPrompt,
 } from '@/lib/ai/prompts'
+import {
+  finalizeFieldAnswers,
+  isNoticePeriodQuestion,
+  isYearsExperienceQuestion,
+  noticeAnswerForProfile,
+} from '@/lib/autofill/normalize'
 import { onMessage } from '@/lib/messaging'
 import {
   profileStorage,
@@ -176,8 +182,13 @@ export default defineBackground(() => {
           }
         }
 
-        // 3. Coerce years/numeric + fill any still-empty years questions from profile
-        answers = finalizeAnswers(profile, fields, answers)
+        // 3. Coerce years/notice/numeric + fill gaps from profile
+        answers = finalizeFieldAnswers(
+          profile,
+          fields,
+          answers,
+          yearsAnswerForQuestion,
+        )
 
         const stillMissing = unresolvedFields.filter(
           (f) => f.required && !String(answers[f.id] ?? '').trim(),
@@ -573,9 +584,9 @@ function resolveFieldsLocally(
     ) {
       answers[field.id] = profile.location || ''
     }
-    // Notice period
-    else if (label.includes('notice') || label.includes('can you join')) {
-      answers[field.id] = profile.noticePeriod || 'Immediately available'
+    // Notice period — LinkedIn expects a number (days/weeks/months), not prose
+    else if (isNoticePeriodQuestion(label)) {
+      answers[field.id] = noticeAnswerForProfile(profile, label, field)
     }
     // Salary / CTC / compensation
     else if (
@@ -742,37 +753,6 @@ function resolveFieldsLocally(
   return answers
 }
 
-function finalizeAnswers(
-  profile: UserProfile,
-  fields: Array<FormField>,
-  answers: Record<string, string>,
-): Record<string, string> {
-  const out: Record<string, string> = { ...answers }
-
-  for (const field of fields) {
-    let value = out[field.id]
-    if (
-      (!value || !String(value).trim()) &&
-      isYearsExperienceQuestion(field.label.toLowerCase())
-    ) {
-      value = yearsAnswerForQuestion(profile, field.label.toLowerCase())
-    }
-    if (value == null || value === '') continue
-
-    let v = String(value).trim()
-    if (isYearsExperienceQuestion(field.label.toLowerCase())) {
-      const m = v.match(/-?\d+(?:\.\d+)?/)
-      v = m ? m[0] : v.replace(/[^\d.]/g, '')
-    }
-    if (field.maxLength && field.maxLength > 0 && v.length > field.maxLength) {
-      v = v.slice(0, field.maxLength)
-    }
-    out[field.id] = v
-  }
-
-  return out
-}
-
 function matchCachedAnswer(profile: UserProfile, label: string): string | null {
   const entries = Object.entries(profile.cachedAnswers ?? {})
   if (entries.length === 0) return null
@@ -806,26 +786,6 @@ function isSkillSpecificYears(label: string): boolean {
       /\b(aws|azure|gcp|linux|python|java|react|docker|kubernetes)\b/.test(
         label,
       ))
-  )
-}
-
-function isYearsExperienceQuestion(label: string): boolean {
-  if (
-    /\b(authorized|sponsor|visa|relocat|gender|disability|veteran)\b/.test(
-      label,
-    )
-  ) {
-    return false
-  }
-  return (
-    /\bhow many\b/.test(label) ||
-    (/\byears?\b/.test(label) &&
-      (/\bexperience\b/.test(label) ||
-        /\bwith\b/.test(label) ||
-        /\bwork\b/.test(label))) ||
-    (/\bexperience\b/.test(label) &&
-      (/\bwith\b/.test(label) || /\bin\b/.test(label)) &&
-      !/\b(describe|tell us|summary)\b/.test(label))
   )
 }
 

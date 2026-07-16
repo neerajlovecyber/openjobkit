@@ -7,6 +7,7 @@
 
 import type { ContentScriptContext } from 'wxt/utils/content-script-context'
 
+import { coerceAnswerForField } from '@/lib/autofill/normalize'
 import { sendToBackground, onMessage } from '@/lib/messaging'
 
 import type { FormField } from '@/types/messages'
@@ -1056,6 +1057,8 @@ function detectFormFields(container: HTMLElement): Array<FormField> {
     const fieldId = `field_${fields.length}`
     el.setAttribute('data-ojk-field', fieldId)
 
+    const maxLength = inferMaxLength(el, questionRoot)
+
     fields.push({
       id: fieldId,
       label,
@@ -1067,7 +1070,7 @@ function detectFormFields(container: HTMLElement): Array<FormField> {
             : el instanceof HTMLInputElement && el.type === 'number'
               ? 'number'
               : 'text',
-      required: el.required,
+      required: el.required || label.endsWith('*') || label.endsWith('*'),
       placeholder:
         el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
           ? el.placeholder
@@ -1079,12 +1082,7 @@ function detectFormFields(container: HTMLElement): Array<FormField> {
               .filter(Boolean)
           : undefined,
       selector: `[data-ojk-field="${fieldId}"]`,
-      maxLength:
-        el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
-          ? el.maxLength > 0 && el.maxLength < 500_000
-            ? el.maxLength
-            : undefined
-          : undefined,
+      maxLength,
       min: el instanceof HTMLInputElement ? el.min || undefined : undefined,
       max: el instanceof HTMLInputElement ? el.max || undefined : undefined,
     })
@@ -1121,6 +1119,24 @@ function preferVisuallyHiddenText(el: Element | null): string | null {
   if (!el) return null
   const hidden = el.querySelector('.visually-hidden')
   return cleanLabelText(hidden?.textContent) ?? cleanLabelText(el.textContent)
+}
+
+/** Read maxlength from the input or LinkedIn's "of N characters" hint. */
+function inferMaxLength(
+  el: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement,
+  questionRoot: Element | null,
+): number | undefined {
+  if (el instanceof HTMLSelectElement) return undefined
+  if (el.maxLength > 0 && el.maxLength < 500_000) return el.maxLength
+
+  const scope = questionRoot ?? el.parentElement
+  const hint = scope?.textContent ?? ''
+  const m = hint.match(/of\s+(\d+)\s+characters?/i)
+  if (m) {
+    const n = parseInt(m[1], 10)
+    if (n > 0 && n < 500_000) return n
+  }
+  return undefined
 }
 
 function collectRadioFields(
@@ -1483,30 +1499,9 @@ function setNativeValue(
   el.dispatchEvent(new Event('blur', { bubbles: true }))
 }
 
-/** LinkedIn numeric/years fields reject prose — keep digits (and one decimal). */
-function coerceAnswerForField(field: FormField, value: string): string {
-  let v = value.trim()
-  if (isYearsOrNumericQuestion(field.label)) {
-    const m = v.match(/-?\d+(?:\.\d+)?/)
-    v = m ? m[0] : v.replace(/[^\d.]/g, '')
-  }
-  if (field.maxLength && field.maxLength > 0 && v.length > field.maxLength) {
-    v = v.slice(0, field.maxLength)
-  }
-  return v
-}
-
-function isYearsOrNumericQuestion(label: string): boolean {
-  const l = label.toLowerCase()
-  if (/\b(yes|no)\b/.test(l) && !/\byears?\b/.test(l)) return false
-  return (
-    /\bhow many\b/.test(l) ||
-    /\byears?\b/.test(l) ||
-    /\bmonths?\b/.test(l) ||
-    (/\bexperience\b/.test(l) &&
-      (/\bwith\b/.test(l) || /\bin\b/.test(l) || /\bof\b/.test(l))) ||
-    /\b(gpa|scale of|rating|notice period)\b/.test(l)
-  )
+/** LinkedIn numeric/years/notice fields reject prose — normalize before typing. */
+function coerceForDom(field: FormField, value: string): string {
+  return coerceAnswerForField(field, value)
 }
 
 function clickRadioOrCheckbox(
@@ -1561,7 +1556,7 @@ function applyAnswers(
     }
 
     if (value === undefined || value === null) return
-    value = coerceAnswerForField(field, String(value))
+    value = coerceForDom(field, String(value))
     if (!value && field.type !== 'checkbox') return
 
     if (field.type === 'radio') {

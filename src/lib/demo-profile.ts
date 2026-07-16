@@ -151,7 +151,7 @@ Lovely Professional University, Punjab | Aug 2020 – Oct 2024`,
   targetLocations: ['Delhi NCR', 'Remote', 'Bengaluru', 'Hyderabad'],
   desiredSalary: undefined,
   remotePreference: 'remote',
-  noticePeriod: 'Immediately available',
+  noticePeriod: '0', // days — LinkedIn expects a number (0 = immediate)
 
   // ── Cached answers (pre-fill common questions) ─────────────────────────────
   cachedAnswers: {
@@ -160,7 +160,7 @@ Lovely Professional University, Punjab | Aug 2020 – Oct 2024`,
     'require visa sponsorship': 'No',
     'highest education': "Bachelor's Degree",
     'willing to relocate': 'Yes',
-    'notice period': 'Immediately available',
+    'notice period': '0',
     'expected salary': 'Open to discussion',
     'how did you hear about us': 'Job board',
   },

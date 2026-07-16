@@ -596,9 +596,10 @@ export function PreferencesSection({
             <option value="onsite">Onsite</option>
           </select>
         </Field>
-        <Field label="Notice Period">
+        <Field label="Notice Period (days)">
           <input
             className={fieldClass}
+            placeholder="0 = immediate, 30 = 30 days"
             value={profile.noticePeriod || ''}
             onChange={(e) => onChange('noticePeriod', e.target.value)}
           />
