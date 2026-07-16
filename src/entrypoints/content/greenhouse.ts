@@ -12,7 +12,7 @@
 // Per inject-run-at-timing skill: document_end — DOM must be parsed so we
 // can query form elements, but we don't need to wait for full page load.
 
-import type { ContentScriptContext } from 'wxt/client'
+import type { ContentScriptContext } from 'wxt/utils/content-script-context'
 
 import { sendToBackground, onMessage } from '@/lib/messaging'
 
@@ -58,6 +58,16 @@ export function initGreenhouse(ctx: ContentScriptContext) {
 
   ctx.onInvalidated(() => {
     cleanup()
+    const btn = document.getElementById(
+      'ojk-fill-btn',
+    ) as HTMLButtonElement | null
+    if (btn) {
+      btn.textContent = '⚠️ Extension updated. Please refresh page.'
+      btn.style.background = 'linear-gradient(135deg, #f59e0b, #d97706)'
+      btn.disabled = true
+      btn.style.cursor = 'not-allowed'
+      btn.style.opacity = '1'
+    }
   })
 }
 

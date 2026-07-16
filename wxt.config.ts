@@ -1,13 +1,27 @@
 import babel from '@rolldown/plugin-babel'
 import tailwindcss from '@tailwindcss/vite'
 import { reactCompilerPreset } from '@vitejs/plugin-react'
+import fs from 'fs'
 import path from 'path'
 import { defineConfig, type WxtViteConfig } from 'wxt'
+
+// Automatically create .wxt/chrome-data directory to prevent
+// chrome-launcher ENOENT chrome-out.log crashes on Windows.
+try {
+  fs.mkdirSync(path.resolve(__dirname, '.wxt/chrome-data'), { recursive: true })
+} catch (e) {
+  // Ignored
+}
 
 // See https://wxt.dev/api/config.html
 export default defineConfig({
   srcDir: 'src',
   modules: ['@wxt-dev/module-react'],
+  webExt: {
+    // Persists profile changes, tabs, and extensions across dev restarts.
+    // This stops Chrome from clearing the extension profile on Vite rebuild.
+    keepProfileChanges: true,
+  },
 
   manifest: {
     name: 'OpenJobKit — AI Job Application Assistant',

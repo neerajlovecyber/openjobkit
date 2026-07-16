@@ -1,6 +1,12 @@
 {
   "version": 1,
   "skills": {
+    "instantdb": {
+      "source": "instantdb/skills",
+      "sourceType": "github",
+      "skillPath": "skills/instantdb/SKILL.md",
+      "computedHash": "cc604d5bf065d1ccab278f11c9b96d0011bb1f14faed7fe672df6e4b4ff332ba"
+    },
     "supabase": {
       "source": "supabase/agent-skills",
       "sourceType": "github",

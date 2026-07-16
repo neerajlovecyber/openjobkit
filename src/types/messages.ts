@@ -53,19 +53,6 @@ export interface UpdateStatusMessage {
   }
 }
 
-/** Popup / Side panel → Background: get all tracked applications */
-export interface GetApplicationsMessage {
-  type: 'GET_APPLICATIONS'
-}
-
-/** Background → Popup / Side panel: respond with all applications */
-export interface ApplicationsResponseMessage {
-  type: 'APPLICATIONS_RESPONSE'
-  payload: {
-    applications: Array<JobApplication>
-  }
-}
-
 /** Popup → Background: trigger fill on the active tab */
 export interface TriggerFillActiveTabMessage {
   type: 'TRIGGER_FILL_ACTIVE_TAB'
@@ -100,8 +87,6 @@ export type ExtensionMessage =
   | FillAnswersMessage
   | SubmitJobMessage
   | UpdateStatusMessage
-  | GetApplicationsMessage
-  | ApplicationsResponseMessage
   | TriggerFillActiveTabMessage
   | TriggerFillMessage
   | PingMessage

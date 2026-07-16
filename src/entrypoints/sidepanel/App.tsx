@@ -1,8 +1,23 @@
-import { useEffect, useState } from 'react'
+import React from 'react'
 
-import { sendToBackground } from '@/lib/messaging'
+import { db, USER_ID } from '@/lib/db'
 
 import type { JobApplication } from '@/types/job'
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function rowToApp(row: any): JobApplication {
+  return {
+    id: row.appId as string,
+    job: row.job as JobApplication['job'],
+    status: row.status as JobApplication['status'],
+    appliedAt: (row.appliedAt as string | null) ?? undefined,
+    notes: (row.notes as string | null) ?? undefined,
+    coverLetter: (row.coverLetter as string | null) ?? undefined,
+    aiGeneratedAnswers:
+      (row.aiGeneratedAnswers as Record<string, string> | null) ?? undefined,
+    error: (row.error as string | null) ?? undefined,
+  }
+}
 
 const STATUS_COLORS: Record<JobApplication['status'], string> = {
   detected: 'bg-blue-500/20 text-blue-300 border-blue-500/30',
@@ -27,32 +42,19 @@ const STATUS_LABELS: Record<JobApplication['status'], string> = {
 }
 
 export default function App() {
-  const [applications, setApplications] = useState<Array<JobApplication>>([])
-  const [loading, setLoading] = useState(true)
-  const [filter, setFilter] = useState<JobApplication['status'] | 'all'>('all')
+  // Real-time reactive query — updates the moment the background SW writes
+  // a new application or changes a status. No polling, no messaging needed.
+  const { isLoading, data } = db.useQuery({
+    applications: {
+      $: { where: { userId: USER_ID }, order: { updatedAt: 'desc' } },
+    },
+  })
 
-  useEffect(() => {
-    void loadApplications()
+  const [filter, setFilter] = React.useState<JobApplication['status'] | 'all'>(
+    'all',
+  )
 
-    // Poll for updates every 5 seconds while side panel is open
-    const interval = setInterval(() => void loadApplications(), 5000)
-    return () => clearInterval(interval)
-  }, [])
-
-  async function loadApplications() {
-    try {
-      const result = await sendToBackground<{
-        applications: Array<JobApplication>
-      }>({
-        type: 'GET_APPLICATIONS',
-      })
-      setApplications(result?.applications ?? [])
-    } catch {
-      // Background may not be ready yet on first open
-    } finally {
-      setLoading(false)
-    }
-  }
+  const applications = data?.applications.map(rowToApp) ?? []
 
   const filtered =
     filter === 'all'
@@ -111,7 +113,7 @@ export default function App() {
 
       {/* Body */}
       <main className="flex-1 space-y-2 overflow-y-auto px-3 py-3">
-        {loading ? (
+        {isLoading ? (
           <div className="flex h-40 items-center justify-center text-sm text-white/30">
             Loading…
           </div>

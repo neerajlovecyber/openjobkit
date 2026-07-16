@@ -4,7 +4,7 @@
 //   1. Listen for DETECT_JOB messages from content scripts
 //   2. Call the AI API with user profile + job details
 //   3. Return filled answers back to the content script
-//   4. Track applications in chrome.storage.local
+//   4. Track applications in InstantDB (local-first, auto cloud sync)
 
 import { createAIClient } from '@/lib/ai/client'
 import {
@@ -182,7 +182,7 @@ export default defineBackground(() => {
           )
           await browser.scripting.executeScript({
             target: { tabId: tab.id },
-            files: ['content-scripts/content.js'],
+            files: ['/content-scripts/content.js'],
           })
           // Wait briefly for the script to load and register the form
           await new Promise((resolve) => setTimeout(resolve, 300))
@@ -222,7 +222,7 @@ export default defineBackground(() => {
         try {
           await browser.scripting.executeScript({
             target: { tabId: tab.id },
-            files: ['content-scripts/content.js'],
+            files: ['/content-scripts/content.js'],
           })
           // Wait briefly, get the fresh mapping, and re-send
           await new Promise((resolve) => setTimeout(resolve, 300))
@@ -241,12 +241,6 @@ export default defineBackground(() => {
           console.error('[OpenJobKit] Force re-injection failed:', injectErr)
         }
       }
-    },
-
-    // ── Popup / Side panel requesting application list ───────────────────────
-    GET_APPLICATIONS: async () => {
-      const applications = await applicationsStorage.getAll()
-      return { type: 'APPLICATIONS_RESPONSE', payload: { applications } }
     },
   })
 

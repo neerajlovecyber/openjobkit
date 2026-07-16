@@ -9,7 +9,7 @@ export type ApplyMode =
 
 export interface AISettings {
   provider: AIProvider
-  apiKey: string // Stored encrypted in chrome.storage.local
+  apiKey: string // Stored in InstantDB (encrypted at rest)
   model: string // e.g. "gpt-4o", "gemini-1.5-pro"
   temperature: number // 0–1, default 0.3
   maxTokens: number
@@ -26,12 +26,6 @@ export interface PlatformSettings {
   smartrecruiters: boolean
 }
 
-export interface SupabaseSettings {
-  syncToSupabase: boolean
-  supabaseUrl: string
-  supabaseAnonKey: string
-}
-
 export interface UserSettings {
   // Core behavior
   applyMode: ApplyMode
@@ -40,9 +34,6 @@ export interface UserSettings {
 
   // AI
   ai: AISettings
-
-  // Supabase Cloud Sync
-  supabase: SupabaseSettings
 
   // Platform toggles
   platforms: PlatformSettings
@@ -78,22 +69,11 @@ export const DEFAULT_PLATFORM_SETTINGS: PlatformSettings = {
   smartrecruiters: false,
 }
 
-export const DEFAULT_SUPABASE_SETTINGS: SupabaseSettings = {
-  syncToSupabase: false,
-  supabaseUrl:
-    (import.meta.env.VITE_SUPABASE_URL as string) ||
-    'https://uzroqlyiygxtftcvuljv.supabase.co',
-  supabaseAnonKey:
-    (import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string) ||
-    'sb_publishable_0hpSv_rZ2JiMPnD67_xMCA__P0N4Ru6',
-}
-
 export const DEFAULT_SETTINGS: UserSettings = {
   applyMode: 'review',
   autoDetect: true,
   showFloatingButton: true,
   ai: DEFAULT_AI_SETTINGS,
-  supabase: DEFAULT_SUPABASE_SETTINGS,
   platforms: DEFAULT_PLATFORM_SETTINGS,
   trackApplications: true,
   maxHistoryItems: 500,

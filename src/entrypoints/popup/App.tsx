@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react'
+import React from 'react'
 
+import { db, USER_ID } from '@/lib/db'
 import { sendToBackground } from '@/lib/messaging'
-import { activeApplicationsStorage, applicationsStorage } from '@/lib/storage'
+import { activeApplicationsStorage } from '@/lib/storage'
 
 import type { JobApplication } from '@/types/job'
 
@@ -9,7 +10,6 @@ type TabState =
   | { status: 'loading' }
   | { status: 'unsupported'; url: string }
   | { status: 'supported'; platform: string; url: string }
-  | { status: 'detected'; application: JobApplication }
   | { status: 'error'; message: string }
 
 const PLATFORM_LABELS: Record<string, string> = {
@@ -33,13 +33,31 @@ function detectPlatform(url: string): string | null {
   return null
 }
 
-export default function App() {
-  const [tabState, setTabState] = useState<TabState>({ status: 'loading' })
-  const [recentApps, setRecentApps] = useState<Array<JobApplication>>([])
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function rowToApp(row: any): JobApplication {
+  return {
+    id: row.appId as string,
+    job: row.job as JobApplication['job'],
+    status: row.status as JobApplication['status'],
+    appliedAt: (row.appliedAt as string | null) ?? undefined,
+  }
+}
 
-  useEffect(() => {
+export default function App() {
+  const [tabState, setTabState] = React.useState<TabState>({
+    status: 'loading',
+  })
+
+  // Reactive — updates in real-time as background SW writes new apps
+  const { data } = db.useQuery({
+    applications: {
+      $: { where: { userId: USER_ID }, order: { updatedAt: 'desc' }, limit: 3 },
+    },
+  })
+  const recentApps = data?.applications.map(rowToApp) ?? []
+
+  React.useEffect(() => {
     void loadCurrentTab()
-    void loadRecentApps()
   }, [])
 
   async function loadCurrentTab() {
@@ -51,20 +69,23 @@ export default function App() {
       if (!tab?.id) return
       const url = tab.url ?? ''
 
-      // 1. Check if we already have a detected job form for this tab ID in our storage
-      // (This is critical for iframe embeds on custom domains where the top URL doesn't match greenhouse/lever)
+      // Check if we already have a detected job form for this tab
       const activeMapping = await activeApplicationsStorage.get(tab.id)
       if (activeMapping) {
-        const app = await applicationsStorage.getById(
-          activeMapping.applicationId,
-        )
+        // We have a mapping — look up the app to get platform + url from its job data
+        const { data: appData } = await db.queryOnce({
+          applications: {
+            $: { where: { appId: activeMapping.applicationId } },
+          },
+        })
+        const app = appData.applications[0]
         if (app) {
+          const mapped = rowToApp(app)
           setTabState({
             status: 'supported',
-            platform: app.job.platform,
-            url: app.job.url,
+            platform: mapped.job.platform,
+            url: mapped.job.url,
           })
-          // Send PING to restore content script registration context
           try {
             await browser.tabs.sendMessage(tab.id, { type: 'PING' })
           } catch {
@@ -74,34 +95,20 @@ export default function App() {
         }
       }
 
-      // 2. Fallback to top-level URL pattern matching
+      // Fallback to top-level URL pattern matching
       const platform = detectPlatform(url)
       if (platform) {
         setTabState({ status: 'supported', platform, url })
-        // Send PING to all frames to force content scripts to re-register
         try {
           await browser.tabs.sendMessage(tab.id, { type: 'PING' })
         } catch {
-          // Ignored - content script may not be loaded yet
+          // Ignored
         }
       } else {
         setTabState({ status: 'unsupported', url })
       }
     } catch (e) {
       setTabState({ status: 'error', message: String(e) })
-    }
-  }
-
-  async function loadRecentApps() {
-    try {
-      const result = await sendToBackground<{
-        applications: Array<JobApplication>
-      }>({
-        type: 'GET_APPLICATIONS',
-      })
-      setRecentApps((result?.applications ?? []).slice(0, 3))
-    } catch {
-      // background may not be ready yet
     }
   }
 

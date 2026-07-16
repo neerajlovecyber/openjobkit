@@ -1,7 +1,16 @@
-// Typed wrappers around chrome.storage.local
-// All reads/writes go through these helpers to ensure type safety and
-// consistent error handling across background, popup, content, and options.
+// Storage layer — InstantDB replaces chrome.storage.local as the primary store.
+//
+// Profile, settings, and applications are stored in InstantDB which gives us:
+//   - Local-first reads (IndexedDB cache, no network required after first load)
+//   - Automatic real-time cloud sync
+//   - Reactive updates to all open extension pages via db.useQuery()
+//
+// The ONLY thing remaining in browser.storage.local is the ephemeral
+// tab→applicationId mapping, which is tab-scoped and must not outlive the tab.
 
+import { id as instantId } from '@instantdb/react'
+
+import { db, USER_ID } from '@/lib/db'
 import { DEMO_PROFILE } from '@/lib/demo-profile'
 import { DEFAULT_SETTINGS } from '@/types/settings'
 
@@ -10,96 +19,21 @@ import type { UserProfile } from '@/types/profile'
 import type { UserSettings } from '@/types/settings'
 
 // ────────────────────────────────────────────────────────────────────────────
-// Storage Keys
+// Helper: map InstantDB application row → JobApplication
 // ────────────────────────────────────────────────────────────────────────────
 
-export const STORAGE_KEYS = {
-  PROFILE: 'ojk_profile',
-  SETTINGS: 'ojk_settings',
-  APPLICATIONS: 'ojk_applications',
-  ACTIVE_APPLICATIONS: 'ojk_active_applications',
-} as const
-
-export type StorageKey = (typeof STORAGE_KEYS)[keyof typeof STORAGE_KEYS]
-
-// ────────────────────────────────────────────────────────────────────────────
-// Generic read / write
-// ────────────────────────────────────────────────────────────────────────────
-
-async function storageGet<T>(key: StorageKey): Promise<T | null> {
-  const result = await browser.storage.local.get(key)
-  return (result[key] as T) ?? null
-}
-
-async function storageSet<T>(key: StorageKey, value: T): Promise<void> {
-  await browser.storage.local.set({ [key]: value })
-}
-
-async function storageRemove(key: StorageKey): Promise<void> {
-  await browser.storage.local.remove(key)
-}
-
-// ────────────────────────────────────────────────────────────────────────────
-// Supabase Cloud Synchronization Helpers
-// ────────────────────────────────────────────────────────────────────────────
-
-async function syncProfileToSupabase(profile: UserProfile): Promise<void> {
-  try {
-    const settings = await settingsStorage.get()
-    if (
-      settings.supabase.syncToSupabase &&
-      settings.supabase.supabaseUrl &&
-      settings.supabase.supabaseAnonKey
-    ) {
-      const { pushProfileToSupabase } = await import('@/lib/supabase')
-      await pushProfileToSupabase(
-        settings.supabase.supabaseUrl,
-        settings.supabase.supabaseAnonKey,
-        profile,
-      )
-    }
-  } catch (err) {
-    console.error('[OpenJobKit] Background profile sync failed:', err)
-  }
-}
-
-async function syncAppToSupabase(app: JobApplication): Promise<void> {
-  try {
-    const settings = await settingsStorage.get()
-    if (
-      settings.supabase.syncToSupabase &&
-      settings.supabase.supabaseUrl &&
-      settings.supabase.supabaseAnonKey
-    ) {
-      const { pushApplicationToSupabase } = await import('@/lib/supabase')
-      await pushApplicationToSupabase(
-        settings.supabase.supabaseUrl,
-        settings.supabase.supabaseAnonKey,
-        app,
-      )
-    }
-  } catch (err) {
-    console.error('[OpenJobKit] Background application sync failed:', err)
-  }
-}
-
-async function deleteAppFromSupabase(id: string): Promise<void> {
-  try {
-    const settings = await settingsStorage.get()
-    if (
-      settings.supabase.syncToSupabase &&
-      settings.supabase.supabaseUrl &&
-      settings.supabase.supabaseAnonKey
-    ) {
-      const { deleteApplicationFromSupabase } = await import('@/lib/supabase')
-      await deleteApplicationFromSupabase(
-        settings.supabase.supabaseUrl,
-        settings.supabase.supabaseAnonKey,
-        id,
-      )
-    }
-  } catch (err) {
-    console.error('[OpenJobKit] Background application delete failed:', err)
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function rowToApp(row: any): JobApplication {
+  return {
+    id: row.appId as string,
+    job: row.job as JobApplication['job'],
+    status: row.status as JobApplication['status'],
+    appliedAt: (row.appliedAt as string | null) ?? undefined,
+    notes: (row.notes as string | null) ?? undefined,
+    coverLetter: (row.coverLetter as string | null) ?? undefined,
+    aiGeneratedAnswers:
+      (row.aiGeneratedAnswers as Record<string, string> | null) ?? undefined,
+    error: (row.error as string | null) ?? undefined,
   }
 }
 
@@ -108,22 +42,31 @@ async function deleteAppFromSupabase(id: string): Promise<void> {
 // ────────────────────────────────────────────────────────────────────────────
 
 export const profileStorage = {
-  // Returns stored profile, or DEMO_PROFILE as fallback until real profile editor is built
   get: async (): Promise<UserProfile> => {
-    const stored = await storageGet<UserProfile>(STORAGE_KEYS.PROFILE)
-    return stored ?? DEMO_PROFILE
+    const { data } = await db.queryOnce({
+      profiles: { $: { where: { userId: USER_ID } } },
+    })
+    return (data.profiles[0]?.data as unknown as UserProfile) ?? DEMO_PROFILE
   },
+
   set: async (profile: UserProfile): Promise<void> => {
-    await storageSet(STORAGE_KEYS.PROFILE, profile)
-    void syncProfileToSupabase(profile)
+    const { data } = await db.queryOnce({
+      profiles: { $: { where: { userId: USER_ID } } },
+    })
+    const recordId = data.profiles[0]?.id ?? instantId()
+    await db.transact(
+      db.tx.profiles[recordId].update({
+        userId: USER_ID,
+        data: profile as unknown as Record<string, unknown>,
+        updatedAt: Date.now(),
+      }),
+    )
   },
+
   update: async (partial: Partial<UserProfile>): Promise<void> => {
     const existing = await profileStorage.get()
-    const updated = { ...existing, ...partial }
-    await storageSet(STORAGE_KEYS.PROFILE, updated)
-    void syncProfileToSupabase(updated)
+    await profileStorage.set({ ...existing, ...partial })
   },
-  clear: () => storageRemove(STORAGE_KEYS.PROFILE),
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -132,16 +75,51 @@ export const profileStorage = {
 
 export const settingsStorage = {
   get: async (): Promise<UserSettings> => {
-    const stored = await storageGet<UserSettings>(STORAGE_KEYS.SETTINGS)
-    // Merge with defaults so new settings fields are always populated
-    return { ...DEFAULT_SETTINGS, ...stored }
+    const { data } = await db.queryOnce({
+      settings: { $: { where: { userId: USER_ID } } },
+    })
+    const stored = data.settings[0]?.data as unknown as UserSettings | null
+    if (!stored) return DEFAULT_SETTINGS
+
+    // Deep-merge so new default fields added in a future release are always
+    // populated even if the stored blob predates them.
+    return {
+      ...DEFAULT_SETTINGS,
+      ...stored,
+      ai: { ...DEFAULT_SETTINGS.ai, ...stored.ai },
+      platforms: { ...DEFAULT_SETTINGS.platforms, ...stored.platforms },
+    }
   },
-  set: (settings: UserSettings) => storageSet(STORAGE_KEYS.SETTINGS, settings),
-  update: async (partial: Partial<UserSettings>) => {
+
+  set: async (settings: UserSettings): Promise<void> => {
+    const { data } = await db.queryOnce({
+      settings: { $: { where: { userId: USER_ID } } },
+    })
+    const recordId = data.settings[0]?.id ?? instantId()
+    await db.transact(
+      db.tx.settings[recordId].update({
+        userId: USER_ID,
+        data: settings as unknown as Record<string, unknown>,
+        updatedAt: Date.now(),
+      }),
+    )
+  },
+
+  update: async (partial: Partial<UserSettings>): Promise<void> => {
     const existing = await settingsStorage.get()
-    await settingsStorage.set({ ...existing, ...partial })
+    await settingsStorage.set({
+      ...existing,
+      ...partial,
+      ...(partial.ai && { ai: { ...existing.ai, ...partial.ai } }),
+      ...(partial.platforms && {
+        platforms: { ...existing.platforms, ...partial.platforms },
+      }),
+    })
   },
-  reset: () => storageSet(STORAGE_KEYS.SETTINGS, DEFAULT_SETTINGS),
+
+  reset: async (): Promise<void> => {
+    await settingsStorage.set(DEFAULT_SETTINGS)
+  },
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -150,59 +128,110 @@ export const settingsStorage = {
 
 export const applicationsStorage = {
   getAll: async (): Promise<Array<JobApplication>> => {
-    return (
-      (await storageGet<Array<JobApplication>>(STORAGE_KEYS.APPLICATIONS)) ?? []
-    )
+    const { data } = await db.queryOnce({
+      applications: {
+        $: { where: { userId: USER_ID }, order: { updatedAt: 'desc' } },
+      },
+    })
+    return data.applications.map(rowToApp)
   },
 
-  getById: async (id: string): Promise<JobApplication | null> => {
-    const all = await applicationsStorage.getAll()
-    return all.find((a) => a.id === id) ?? null
+  getById: async (appId: string): Promise<JobApplication | null> => {
+    const { data } = await db.queryOnce({
+      applications: { $: { where: { appId } } },
+    })
+    return data.applications[0] ? rowToApp(data.applications[0]) : null
   },
 
   add: async (application: JobApplication): Promise<void> => {
-    const all = await applicationsStorage.getAll()
     const settings = await settingsStorage.get()
 
-    // Prepend new application and respect max history cap
-    const updated = [application, ...all].slice(0, settings.maxHistoryItems)
-    await storageSet(STORAGE_KEYS.APPLICATIONS, updated)
-    void syncAppToSupabase(application)
+    // Enforce the history cap: delete the oldest record when at limit
+    const { data: existing } = await db.queryOnce({
+      applications: {
+        $: { where: { userId: USER_ID }, order: { updatedAt: 'asc' } },
+      },
+    })
+    if (existing.applications.length >= settings.maxHistoryItems) {
+      const oldest = existing.applications[0]
+      if (oldest) {
+        await db.transact(db.tx.applications[oldest.id].delete())
+      }
+    }
+
+    await db.transact(
+      db.tx.applications[instantId()].update({
+        userId: USER_ID,
+        appId: application.id,
+        job: application.job as unknown as Record<string, unknown>,
+        status: application.status,
+        appliedAt: application.appliedAt ?? null,
+        notes: application.notes ?? null,
+        coverLetter: application.coverLetter ?? null,
+        aiGeneratedAnswers:
+          (application.aiGeneratedAnswers as Record<string, unknown>) ?? null,
+        error: application.error ?? null,
+        updatedAt: Date.now(),
+      }),
+    )
   },
 
   update: async (
-    id: string,
+    appId: string,
     partial: Partial<JobApplication>,
   ): Promise<void> => {
-    const all = await applicationsStorage.getAll()
-    let updatedApp: JobApplication | undefined
-    const updated = all.map((a) => {
-      if (a.id === id) {
-        updatedApp = { ...a, ...partial }
-        return updatedApp
-      }
-      return a
+    const { data } = await db.queryOnce({
+      applications: { $: { where: { appId } } },
     })
-    await storageSet(STORAGE_KEYS.APPLICATIONS, updated)
-    if (updatedApp) {
-      void syncAppToSupabase(updatedApp)
+    const existing = data.applications[0]
+    if (!existing) return
+
+    const merged = { ...rowToApp(existing), ...partial }
+    await db.transact(
+      db.tx.applications[existing.id].update({
+        userId: USER_ID,
+        appId: merged.id,
+        job: merged.job as unknown as Record<string, unknown>,
+        status: merged.status,
+        appliedAt: merged.appliedAt ?? null,
+        notes: merged.notes ?? null,
+        coverLetter: merged.coverLetter ?? null,
+        aiGeneratedAnswers:
+          (merged.aiGeneratedAnswers as Record<string, unknown>) ?? null,
+        error: merged.error ?? null,
+        updatedAt: Date.now(),
+      }),
+    )
+  },
+
+  remove: async (appId: string): Promise<void> => {
+    const { data } = await db.queryOnce({
+      applications: { $: { where: { appId } } },
+    })
+    const existing = data.applications[0]
+    if (existing) {
+      await db.transact(db.tx.applications[existing.id].delete())
     }
   },
 
-  remove: async (id: string): Promise<void> => {
-    const all = await applicationsStorage.getAll()
-    await storageSet(
-      STORAGE_KEYS.APPLICATIONS,
-      all.filter((a) => a.id !== id),
+  clear: async (): Promise<void> => {
+    const { data } = await db.queryOnce({
+      applications: { $: { where: { userId: USER_ID } } },
+    })
+    if (data.applications.length === 0) return
+    await db.transact(
+      data.applications.map((a) => db.tx.applications[a.id].delete()),
     )
-    void deleteAppFromSupabase(id)
   },
-
-  clear: () => storageRemove(STORAGE_KEYS.APPLICATIONS),
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Active Tab Mappings (persisted state for MV3 Service Worker suspension)
+// Active Tab Mappings (ephemeral — stays in browser.storage.local)
+//
+// This maps tabId → { applicationId, frameId } so the background SW knows
+// which application is active on each tab. Tab-scoped by nature; cleared on
+// tab close / page navigation. InstantDB has no concept of tab IDs, so this
+// stays local.
 // ────────────────────────────────────────────────────────────────────────────
 
 export interface ActiveAppMapping {
@@ -212,27 +241,32 @@ export interface ActiveAppMapping {
 
 export const activeApplicationsStorage = {
   get: async (tabId: number): Promise<ActiveAppMapping | null> => {
-    const map = await storageGet<Record<number, ActiveAppMapping>>(
-      STORAGE_KEYS.ACTIVE_APPLICATIONS,
+    const map = await browser.storage.local.get('ojk_active_applications')
+    return (
+      (
+        map['ojk_active_applications'] as
+          | Record<number, ActiveAppMapping>
+          | undefined
+      )?.[tabId] ?? null
     )
-    return map?.[tabId] ?? null
   },
   set: async (tabId: number, mapping: ActiveAppMapping): Promise<void> => {
+    const result = await browser.storage.local.get('ojk_active_applications')
     const map =
-      (await storageGet<Record<number, ActiveAppMapping>>(
-        STORAGE_KEYS.ACTIVE_APPLICATIONS,
-      )) ?? {}
+      (result['ojk_active_applications'] as Record<number, ActiveAppMapping>) ??
+      {}
     map[tabId] = mapping
-    await storageSet(STORAGE_KEYS.ACTIVE_APPLICATIONS, map)
+    await browser.storage.local.set({ ojk_active_applications: map })
   },
   remove: async (tabId: number): Promise<void> => {
-    const map = await storageGet<Record<number, ActiveAppMapping>>(
-      STORAGE_KEYS.ACTIVE_APPLICATIONS,
-    )
+    const result = await browser.storage.local.get('ojk_active_applications')
+    const map = result['ojk_active_applications'] as
+      | Record<number, ActiveAppMapping>
+      | undefined
     if (map) {
       delete map[tabId]
-      await storageSet(STORAGE_KEYS.ACTIVE_APPLICATIONS, map)
+      await browser.storage.local.set({ ojk_active_applications: map })
     }
   },
-  clear: () => storageRemove(STORAGE_KEYS.ACTIVE_APPLICATIONS),
+  clear: () => browser.storage.local.remove('ojk_active_applications'),
 }

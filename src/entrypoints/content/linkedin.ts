@@ -3,7 +3,7 @@
 //
 // Matches: linkedin.com/jobs/* and linkedin.com/jobs/view/*
 
-import type { ContentScriptContext } from 'wxt/client'
+import type { ContentScriptContext } from 'wxt/utils/content-script-context'
 
 import { sendToBackground, onMessage } from '@/lib/messaging'
 
@@ -44,6 +44,16 @@ export function initLinkedin(ctx: ContentScriptContext) {
   ctx.onInvalidated(() => {
     observer.disconnect()
     cleanup()
+    const btn = document.getElementById(
+      'ojk-fill-btn',
+    ) as HTMLButtonElement | null
+    if (btn) {
+      btn.textContent = '⚠️ Extension updated. Please refresh page.'
+      btn.style.background = 'linear-gradient(135deg, #f59e0b, #d97706)'
+      btn.disabled = true
+      btn.style.cursor = 'not-allowed'
+      btn.style.opacity = '1'
+    }
   })
 }
 
