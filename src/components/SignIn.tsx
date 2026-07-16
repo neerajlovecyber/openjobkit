@@ -7,12 +7,21 @@ interface SignInProps {
 }
 
 export default function SignIn({ compact = false }: SignInProps) {
-  const [email, setEmail] = useState('')
+  // Read initial states from localStorage to survive popup unmounting
+  const [email, setEmail] = useState(() => {
+    return localStorage.getItem('ojk_signin_email') || ''
+  })
   const [code, setCode] = useState('')
-  const [step, setStep] = useState<'email' | 'code'>('email')
+  const [step, setStep] = useState<'email' | 'code'>(() => {
+    return (
+      (localStorage.getItem('ojk_signin_step') as 'email' | 'code') || 'email'
+    )
+  })
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [successMsg, setSuccessMsg] = useState<string | null>(null)
+  const [successMsg, setSuccessMsg] = useState<string | null>(() => {
+    return localStorage.getItem('ojk_signin_successMsg') || null
+  })
 
   const handleSendCode = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -21,8 +30,15 @@ export default function SignIn({ compact = false }: SignInProps) {
     setError(null)
     try {
       await db.auth.sendMagicCode({ email })
+
+      // Save state to localStorage
+      localStorage.setItem('ojk_signin_email', email)
+      localStorage.setItem('ojk_signin_step', 'code')
+      const msg = `Sent code to ${email}`
+      localStorage.setItem('ojk_signin_successMsg', msg)
+
       setStep('code')
-      setSuccessMsg(`Sent code to ${email}`)
+      setSuccessMsg(msg)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -37,11 +53,27 @@ export default function SignIn({ compact = false }: SignInProps) {
     setError(null)
     try {
       await db.auth.signInWithMagicCode({ email, code })
+
+      // Clear saved state on success
+      localStorage.removeItem('ojk_signin_email')
+      localStorage.removeItem('ojk_signin_step')
+      localStorage.removeItem('ojk_signin_successMsg')
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
       setLoading(false)
     }
+  }
+
+  const handleBack = () => {
+    // Clear saved state on back
+    localStorage.removeItem('ojk_signin_email')
+    localStorage.removeItem('ojk_signin_step')
+    localStorage.removeItem('ojk_signin_successMsg')
+
+    setStep('email')
+    setError(null)
+    setSuccessMsg(null)
   }
 
   if (compact) {
@@ -114,11 +146,7 @@ export default function SignIn({ compact = false }: SignInProps) {
             <div className="flex gap-2">
               <button
                 type="button"
-                onClick={() => {
-                  setStep('email')
-                  setError(null)
-                  setSuccessMsg(null)
-                }}
+                onClick={handleBack}
                 className="flex-1 cursor-pointer rounded-lg border border-white/10 bg-white/5 py-2 text-xs font-semibold text-white transition-all hover:bg-white/10 active:scale-[0.98]"
               >
                 Back
@@ -208,11 +236,7 @@ export default function SignIn({ compact = false }: SignInProps) {
               <div className="flex gap-3">
                 <button
                   type="button"
-                  onClick={() => {
-                    setStep('email')
-                    setError(null)
-                    setSuccessMsg(null)
-                  }}
+                  onClick={handleBack}
                   className="flex-1 cursor-pointer rounded-xl border border-white/10 bg-white/5 py-2.5 text-sm font-semibold text-white transition-all hover:bg-white/10 active:scale-[0.98]"
                 >
                   Back
