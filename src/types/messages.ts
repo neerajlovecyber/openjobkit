@@ -66,6 +66,19 @@ export interface ApplicationsResponseMessage {
   }
 }
 
+/** Popup → Background: trigger fill on the active tab */
+export interface TriggerFillActiveTabMessage {
+  type: 'TRIGGER_FILL_ACTIVE_TAB'
+}
+
+/** Background → Content script: execute form fill */
+export interface TriggerFillMessage {
+  type: 'TRIGGER_FILL'
+  payload: {
+    applicationId: string
+  }
+}
+
 /** Any → Any: generic error */
 export interface ErrorMessage {
   type: 'ERROR'
@@ -84,6 +97,8 @@ export type ExtensionMessage =
   | UpdateStatusMessage
   | GetApplicationsMessage
   | ApplicationsResponseMessage
+  | TriggerFillActiveTabMessage
+  | TriggerFillMessage
   | ErrorMessage
 
 // ────────────────────────────────────────────────────────────────────────────

@@ -74,18 +74,11 @@ export default function App() {
   }
 
   async function handleFillPage() {
-    const [tab] = await browser.tabs.query({
-      active: true,
-      currentWindow: true,
-    })
-    if (!tab?.id) return
-    // Trigger fill via scripting injection — content script handles the rest
-    await browser.scripting.executeScript({
-      target: { tabId: tab.id, allFrames: true },
-      func: () => {
-        document.dispatchEvent(new CustomEvent('ojk:trigger-fill'))
-      },
-    })
+    try {
+      await sendToBackground({ type: 'TRIGGER_FILL_ACTIVE_TAB' })
+    } catch (e) {
+      console.error('[OpenJobKit] Failed to trigger fill:', e)
+    }
   }
 
   return (

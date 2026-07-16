@@ -12,7 +12,7 @@
 // Per inject-run-at-timing skill: document_end — DOM must be parsed so we
 // can query form elements, but we don't need to wait for full page load.
 
-import { sendToBackground } from '@/lib/messaging'
+import { sendToBackground, onMessage } from '@/lib/messaging'
 
 import type { FormField } from '@/types/messages'
 
@@ -31,17 +31,29 @@ export default defineContentScript({
     )
 
     // Wait for the form to appear (Greenhouse renders async)
-    waitForForm(ctx).then((form) => {
+    void waitForForm(ctx).then((form) => {
       if (!form) return
       void handleGreenhouseForm(form)
     })
 
-    // Also listen for popup-triggered fill
-    document.addEventListener('ojk:trigger-fill', () => {
-      const form = document.querySelector<HTMLFormElement>(
-        '#application_form, form[data-qa="application-form"], form',
-      )
-      if (form) void handleGreenhouseForm(form)
+    // Listen for triggering fill from the popup/background
+    const cleanup = onMessage({
+      TRIGGER_FILL: async (msg) => {
+        const { applicationId } = msg.payload
+        const form = document.querySelector<HTMLFormElement>(
+          '#application_form, form[data-qa="application-form"], form',
+        )
+        if (form) {
+          const btn =
+            (document.getElementById('ojk-fill-btn') as HTMLButtonElement) ||
+            document.createElement('button')
+          await fillForm(form, applicationId, btn)
+        }
+      },
+    })
+
+    ctx.onInvalidated(() => {
+      cleanup()
     })
   },
 })

@@ -26,9 +26,15 @@ export default defineBackground(() => {
     id: browser.runtime.id,
   })
 
+  // Track active application and its frame ID per tab
+  const activeApplications = new Map<
+    number,
+    { applicationId: string; frameId: number }
+  >()
+
   const cleanup = onMessage({
     // ── Content script detected a job form ──────────────────────────────────
-    DETECT_JOB: async (msg, _sender) => {
+    DETECT_JOB: async (msg, sender) => {
       const { job } = msg.payload
       const settings = await settingsStorage.get()
 
@@ -47,6 +53,14 @@ export default defineBackground(() => {
 
       await applicationsStorage.add(application)
       console.log('[OpenJobKit] Detected job:', job.title, 'at', job.company)
+
+      // Store the active application mapping for this tab and frame
+      if (sender.tab?.id) {
+        activeApplications.set(sender.tab.id, {
+          applicationId: application.id,
+          frameId: sender.frameId ?? 0,
+        })
+      }
 
       return { applicationId: application.id }
     },
@@ -120,6 +134,34 @@ export default defineBackground(() => {
         appliedAt: new Date().toISOString(),
       })
       console.log('[OpenJobKit] Application submitted:', applicationId)
+    },
+
+    // ── Trigger fill on the active tab's detected form frame ────────────────
+    TRIGGER_FILL_ACTIVE_TAB: async () => {
+      const [tab] = await browser.tabs.query({
+        active: true,
+        currentWindow: true,
+      })
+      if (!tab?.id) return
+
+      const active = activeApplications.get(tab.id)
+      if (!active) {
+        console.warn(
+          '[OpenJobKit] No active application detected for tab:',
+          tab.id,
+        )
+        return
+      }
+
+      // Send TRIGGER_FILL to the content script in the correct frame
+      await browser.tabs.sendMessage(
+        tab.id,
+        {
+          type: 'TRIGGER_FILL',
+          payload: { applicationId: active.applicationId },
+        },
+        { frameId: active.frameId },
+      )
     },
 
     // ── Popup / Side panel requesting application list ───────────────────────

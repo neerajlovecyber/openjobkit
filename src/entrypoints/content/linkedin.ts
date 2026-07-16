@@ -3,13 +3,13 @@
 //
 // Matches: linkedin.com/jobs/* and linkedin.com/jobs/view/*
 
-import { sendToBackground } from '@/lib/messaging'
+import { sendToBackground, onMessage } from '@/lib/messaging'
 
 import type { FormField } from '@/types/messages'
 
 export default defineContentScript({
   matches: ['*://*.linkedin.com/jobs/*'],
-  main() {
+  main(ctx) {
     console.log('[OpenJobKit] LinkedIn content script loaded')
 
     // Watch for Easy Apply modal to open
@@ -22,6 +22,22 @@ export default defineContentScript({
     })
 
     observer.observe(document.body, { childList: true, subtree: true })
+
+    // Listen for triggering fill from the popup
+    const cleanup = onMessage({
+      TRIGGER_FILL: async (msg) => {
+        const { applicationId } = msg.payload
+        const modal = document.querySelector('[data-test-modal]') as HTMLElement
+        if (modal) {
+          await fillCurrentPage(modal, applicationId)
+        }
+      },
+    })
+
+    ctx.onInvalidated(() => {
+      observer.disconnect()
+      cleanup()
+    })
   },
 })
 
