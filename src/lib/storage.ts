@@ -14,7 +14,7 @@ import { db } from '@/lib/db'
 import { DEMO_PROFILE } from '@/lib/demo-profile'
 import { DEFAULT_SETTINGS } from '@/types/settings'
 
-import type { JobApplication } from '@/types/job'
+import type { JobApplication, JobListing } from '@/types/job'
 import type { UserProfile } from '@/types/profile'
 import type { UserSettings } from '@/types/settings'
 
@@ -142,6 +142,33 @@ export const settingsStorage = {
 // Job Applications
 // ────────────────────────────────────────────────────────────────────────────
 
+/** Strip hash + tracking params so the same job page matches across reloads. */
+export function normalizeJobUrl(url: string): string {
+  try {
+    const parsed = new URL(url)
+    parsed.hash = ''
+    for (const key of [
+      'utm_source',
+      'utm_medium',
+      'utm_campaign',
+      'utm_term',
+      'utm_content',
+      'fbclid',
+      'gclid',
+      'mc_cid',
+      'mc_eid',
+    ]) {
+      parsed.searchParams.delete(key)
+    }
+    // Drop trailing slash for stable comparison
+    let normalized = parsed.toString()
+    if (normalized.endsWith('/')) normalized = normalized.slice(0, -1)
+    return normalized
+  } catch {
+    return url.trim()
+  }
+}
+
 export const applicationsStorage = {
   getAll: async (): Promise<Array<JobApplication>> => {
     const userId = await getUserId()
@@ -158,6 +185,21 @@ export const applicationsStorage = {
       applications: { $: { where: { appId } } },
     })
     return data.applications[0] ? rowToApp(data.applications[0]) : null
+  },
+
+  /** Find the latest open application for this job URL (dedupe detections). */
+  getOpenByJobUrl: async (url: string): Promise<JobApplication | null> => {
+    const normalized = normalizeJobUrl(url)
+    if (!normalized) return null
+
+    const apps = await applicationsStorage.getAll()
+    return (
+      apps.find((app) => {
+        if (normalizeJobUrl(app.job.url) !== normalized) return false
+        // Treat applied/skipped as finished — allow a fresh detection later
+        return app.status !== 'applied' && app.status !== 'skipped'
+      }) ?? null
+    )
   },
 
   add: async (application: JobApplication): Promise<void> => {
@@ -255,6 +297,8 @@ export const applicationsStorage = {
 export interface ActiveAppMapping {
   applicationId: string
   frameId: number
+  /** Scraped job details — kept ephemeral until autofill actually runs */
+  job: JobListing
 }
 
 export const activeApplicationsStorage = {

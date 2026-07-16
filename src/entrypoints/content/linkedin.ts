@@ -27,10 +27,15 @@ export function initLinkedin(ctx: ContentScriptContext) {
   const cleanup = onMessage({
     PING: () => {
       const modal = document.querySelector('[data-test-modal]')
-      if (modal) {
-        modal.removeAttribute('data-ojk-detected')
-        void handleEasyApplyModal(modal as HTMLElement)
+      if (!modal) return
+      if (modal.getAttribute('data-ojk-detected')) {
+        if (!modal.querySelector('#ojk-fill-btn')) {
+          modal.removeAttribute('data-ojk-detected')
+          void handleEasyApplyModal(modal as HTMLElement)
+        }
+        return
       }
+      void handleEasyApplyModal(modal as HTMLElement)
     },
     TRIGGER_FILL: async (msg) => {
       const { applicationId } = msg.payload

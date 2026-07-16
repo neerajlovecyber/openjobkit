@@ -42,6 +42,12 @@ export default defineConfig({
     action: {
       default_title: 'OpenJobKit',
     },
+    web_accessible_resources: [
+      {
+        resources: ['autofill-modal.html'],
+        matches: ['<all_urls>'],
+      },
+    ],
   },
 
   vite: () =>

@@ -2,6 +2,14 @@ import React, { useEffect, useRef, useState } from 'react'
 
 import { id as instantId } from '@instantdb/react'
 
+import {
+  AutofillSectionNav,
+  EducationSection,
+  ExperienceSection,
+  PersonalSection,
+  PreferencesSection,
+  SkillsSection,
+} from '@/components/autofill/AutofillSections'
 import SignIn from '@/components/SignIn'
 import {
   Combobox,
@@ -16,6 +24,7 @@ import { DEMO_PROFILE } from '@/lib/demo-profile'
 import { extractTextFromPdf } from '@/lib/pdf'
 import { DEFAULT_SETTINGS } from '@/types/settings'
 
+import type { AutofillSection } from '@/components/autofill/sections'
 import type { UserProfile } from '@/types/profile'
 import type { UserSettings } from '@/types/settings'
 
@@ -48,15 +57,26 @@ const POPULAR_MODELS: Record<
 
 export default function SettingsApp({
   embedded = false,
+  modal = false,
   onBack,
+  onClose,
+  initialTab = 'profile',
 }: {
   /** Compact layout for the side panel (no full-page chrome). */
   embedded?: boolean
+  /** Page-overlay dialog layout (Jobright-style). */
+  modal?: boolean
   /** Shown in embedded mode to return to the main panel view. */
   onBack?: () => void
+  /** Close button for modal overlay. */
+  onClose?: () => void
+  initialTab?: 'profile' | 'ai'
 }) {
   const { isLoading: isAuthLoading, user, error: authError } = db.useAuth()
-  const [activeTab, setActiveTab] = useState<'profile' | 'ai'>('profile')
+  const [activeTab, setActiveTab] = useState<'profile' | 'ai'>(initialTab)
+  const [section, setSection] = useState<AutofillSection>(
+    initialTab === 'ai' ? 'ai' : 'personal',
+  )
 
   // ── Reactive cloud data ────────────────────────────────────────────────────
   const { isLoading: isDataLoading, data } = db.useQuery(
@@ -126,7 +146,25 @@ export default function SettingsApp({
   useEffect(() => {
     if (user && !isDataLoading && !initialized.current) {
       initialized.current = true
-      setProfile((cloudProfile?.data as unknown as UserProfile) ?? DEMO_PROFILE)
+      const storedProfile = cloudProfile?.data as unknown as UserProfile | null
+      setProfile(
+        storedProfile
+          ? {
+              ...DEMO_PROFILE,
+              ...storedProfile,
+              workExperience:
+                storedProfile.workExperience ?? DEMO_PROFILE.workExperience,
+              education: storedProfile.education ?? DEMO_PROFILE.education,
+              skills: storedProfile.skills ?? DEMO_PROFILE.skills,
+              targetRoles:
+                storedProfile.targetRoles ?? DEMO_PROFILE.targetRoles,
+              targetLocations:
+                storedProfile.targetLocations ?? DEMO_PROFILE.targetLocations,
+              cachedAnswers:
+                storedProfile.cachedAnswers ?? DEMO_PROFILE.cachedAnswers,
+            }
+          : DEMO_PROFILE,
+      )
       const stored = cloudSettings?.data as unknown as UserSettings | null
       setSettings(
         stored
@@ -367,7 +405,11 @@ export default function SettingsApp({
   if (isAuthLoading) {
     return (
       <div
-        className={`flex items-center justify-center bg-[#0f0f13] text-sm text-white/50 ${embedded ? 'min-h-40 py-8' : 'min-h-screen'}`}
+        className={`flex items-center justify-center text-sm ${
+          modal
+            ? 'h-full bg-[#0f0f13] text-white/50'
+            : `bg-[#0f0f13] text-white/50 ${embedded ? 'min-h-40 py-8' : 'min-h-screen'}`
+        }`}
       >
         Loading authentication state…
       </div>
@@ -377,7 +419,11 @@ export default function SettingsApp({
   if (authError) {
     return (
       <div
-        className={`flex items-center justify-center bg-[#0f0f13] text-sm text-red-400 ${embedded ? 'min-h-40 py-8' : 'min-h-screen'}`}
+        className={`flex items-center justify-center text-sm ${
+          modal
+            ? 'h-full bg-[#0f0f13] text-red-400'
+            : `bg-[#0f0f13] text-red-400 ${embedded ? 'min-h-40 py-8' : 'min-h-screen'}`
+        }`}
       >
         Auth Error: {authError.message}
       </div>
@@ -385,24 +431,297 @@ export default function SettingsApp({
   }
 
   if (!user) {
-    return <SignIn compact={embedded} />
+    return (
+      <div className={modal ? 'h-full overflow-auto bg-[#0f0f13]' : undefined}>
+        <SignIn compact={embedded || modal} />
+      </div>
+    )
   }
 
   if (isDataLoading || !profile || !settings) {
     return (
       <div
-        className={`flex items-center justify-center bg-[#0f0f13] text-sm text-white/50 ${embedded ? 'min-h-40 py-8' : 'min-h-screen'}`}
+        className={`flex items-center justify-center text-sm ${
+          modal
+            ? 'h-full bg-[#0f0f13] text-white/50'
+            : `bg-[#0f0f13] text-white/50 ${embedded ? 'min-h-40 py-8' : 'min-h-screen'}`
+        }`}
       >
         Loading user data…
       </div>
     )
   }
 
+  // ── Page overlay modal (dark theme, matches OpenJobKit) ───────────────────
+  if (modal) {
+    const fieldClass =
+      'w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-white placeholder:text-white/30 outline-none focus:border-violet-500'
+    const labelClass = 'mb-1 block text-xs font-medium text-white/60'
+
+    async function saveAll(e: React.FormEvent) {
+      e.preventDefault()
+      if (section === 'ai') {
+        await handleSaveSettings(e)
+      } else {
+        await handleSaveProfile(e)
+      }
+    }
+
+    return (
+      <div className="flex h-full min-h-0 w-full flex-col overflow-hidden bg-[#0f0f13] font-[Inter,sans-serif] text-white">
+        <div className="flex shrink-0 items-center gap-3 border-b border-white/10 px-5 py-4">
+          <div className="min-w-0 flex-1">
+            <h1 className="text-lg font-bold tracking-tight">
+              Your Autofill information
+            </h1>
+            <p className="truncate text-xs text-white/40">{user.email}</p>
+          </div>
+          {onClose && (
+            <button
+              type="button"
+              aria-label="Close"
+              onClick={onClose}
+              className="flex size-8 items-center justify-center rounded-lg text-white/50 transition-colors hover:bg-white/10 hover:text-white"
+            >
+              ✕
+            </button>
+          )}
+        </div>
+
+        <div className="shrink-0 border-b border-sky-500/20 bg-sky-500/10 px-5 py-2.5 text-xs text-sky-200">
+          Your autofill information updates automatically when you upload a
+          resume or update profile details.
+        </div>
+
+        {status && (
+          <div
+            className={`mx-5 mt-3 shrink-0 rounded-xl border px-4 py-2.5 text-sm ${
+              status.type === 'success'
+                ? 'border-green-500/20 bg-green-500/10 text-green-300'
+                : status.type === 'error'
+                  ? 'border-red-500/20 bg-red-500/10 text-red-300'
+                  : 'border-blue-500/20 bg-blue-500/10 text-blue-300'
+            }`}
+          >
+            {status.text}
+          </div>
+        )}
+
+        <form
+          onSubmit={(e) => void saveAll(e)}
+          className="grid min-h-0 flex-1 grid-cols-[200px_minmax(0,1fr)] overflow-hidden"
+        >
+          <AutofillSectionNav
+            section={section}
+            onChange={setSection}
+            profile={profile}
+            settings={settings}
+          />
+
+          <div className="flex min-h-0 flex-col overflow-hidden bg-[#0f0f13]">
+            <div className="min-h-0 flex-1 overflow-y-auto p-5">
+              {section === 'personal' && (
+                <PersonalSection
+                  profile={profile}
+                  onChange={handleProfileChange}
+                />
+              )}
+              {section === 'education' && (
+                <EducationSection
+                  profile={profile}
+                  onChange={handleProfileChange}
+                />
+              )}
+              {section === 'experience' && (
+                <ExperienceSection
+                  profile={profile}
+                  onChange={handleProfileChange}
+                />
+              )}
+              {section === 'skills' && (
+                <SkillsSection
+                  profile={profile}
+                  onChange={handleProfileChange}
+                />
+              )}
+              {section === 'preferences' && (
+                <PreferencesSection
+                  profile={profile}
+                  onChange={handleProfileChange}
+                />
+              )}
+              {section === 'resume' && (
+                <div className="space-y-4">
+                  <div className="rounded-xl border border-white/10 bg-white/5 p-4">
+                    <p className={labelClass}>Resume File (PDF or TXT)</p>
+                    {cloudProfile?.resumeFile ? (
+                      <div className="mt-2 flex items-center gap-3 rounded-lg border border-violet-500/20 bg-violet-500/10 p-3">
+                        <span className="text-xl">📄</span>
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-xs font-semibold text-violet-300">
+                            {cloudProfile.resumeFile.path.split('/').pop() ||
+                              'Resume file'}
+                          </p>
+                          <a
+                            href={cloudProfile.resumeFile.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-[10px] text-white/40 underline"
+                          >
+                            View uploaded file
+                          </a>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={handleRemoveResume}
+                          className="rounded-lg bg-red-500/10 px-2 py-1 text-xs font-semibold text-red-400"
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="relative mt-2 flex flex-col items-center justify-center rounded-lg border border-dashed border-white/20 px-6 py-8 hover:border-violet-400/40">
+                        <input
+                          type="file"
+                          accept=".pdf,.txt"
+                          onChange={handleResumeUpload}
+                          className="absolute inset-0 cursor-pointer opacity-0"
+                        />
+                        <span className="mb-2 text-2xl">📁</span>
+                        <span className="text-xs font-medium text-white/80">
+                          Click or drag PDF or TXT resume here
+                        </span>
+                        <span className="mt-1 text-[10px] text-white/40">
+                          Max size 5MB
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                  <div>
+                    <label className={labelClass}>Extracted Resume Text</label>
+                    <textarea
+                      rows={10}
+                      value={profile.resumeText}
+                      onChange={(e) =>
+                        handleProfileChange('resumeText', e.target.value)
+                      }
+                      className={fieldClass}
+                      placeholder="Upload a resume or paste text…"
+                    />
+                  </div>
+                </div>
+              )}
+              {section === 'ai' && (
+                <div className="space-y-4">
+                  <div>
+                    <label className={labelClass}>AI Provider</label>
+                    <select
+                      value={settings.ai.provider}
+                      onChange={(e) =>
+                        handleAIChange('provider', e.target.value as never)
+                      }
+                      className={`${fieldClass} bg-[#16161c]`}
+                    >
+                      <option value="openai">OpenAI</option>
+                      <option value="openrouter">OpenRouter</option>
+                      <option value="gemini">Google Gemini</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className={labelClass}>API Key</label>
+                    <input
+                      type="password"
+                      value={settings.ai.apiKey}
+                      onChange={(e) => handleAIChange('apiKey', e.target.value)}
+                      className={fieldClass}
+                      placeholder={
+                        settings.ai.provider === 'openrouter'
+                          ? 'sk-or-...'
+                          : settings.ai.provider === 'gemini'
+                            ? 'AIzaSy...'
+                            : 'sk-...'
+                      }
+                    />
+                  </div>
+                  <div>
+                    <label className={labelClass}>Model</label>
+                    <Combobox
+                      value={selectedModelOption}
+                      onValueChange={(val) => {
+                        if (!val) return
+                        setSelectedModelOption(val)
+                        if (val !== 'custom') {
+                          handleAIChange('model', val)
+                        } else {
+                          handleAIChange('model', customModel)
+                        }
+                      }}
+                      onInputValueChange={(val) => setSearch(val)}
+                    >
+                      <ComboboxInput
+                        placeholder={
+                          fetchingModels
+                            ? 'Loading models…'
+                            : 'Select or search a model…'
+                        }
+                      />
+                      <ComboboxContent>
+                        <ComboboxEmpty>No matching models.</ComboboxEmpty>
+                        <ComboboxList>
+                          {filteredItems.map((item) => (
+                            <ComboboxItem key={item.value} value={item.value}>
+                              {item.label}
+                            </ComboboxItem>
+                          ))}
+                        </ComboboxList>
+                      </ComboboxContent>
+                    </Combobox>
+                    {selectedModelOption === 'custom' && (
+                      <input
+                        className={`${fieldClass} mt-2`}
+                        value={customModel}
+                        onChange={(e) => {
+                          setCustomModel(e.target.value)
+                          handleAIChange('model', e.target.value)
+                        }}
+                        placeholder="Custom model name"
+                      />
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="flex shrink-0 items-center justify-center gap-3 border-t border-white/10 bg-[#121218] px-5 py-4">
+              <button
+                type="submit"
+                className="rounded-xl bg-violet-600 px-8 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-violet-500"
+              >
+                Update
+              </button>
+              {section !== 'ai' && (
+                <button
+                  type="button"
+                  onClick={handleLoadDemoProfile}
+                  className="rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm font-medium text-white/70 hover:bg-white/10"
+                >
+                  Load demo
+                </button>
+              )}
+            </div>
+          </div>
+        </form>
+      </div>
+    )
+  }
+
+  const compact = embedded
+
   return (
     <div
-      className={`bg-[#0f0f13] font-[Inter,sans-serif] text-white ${embedded ? 'flex min-h-full flex-col' : 'min-h-screen'}`}
+      className={`bg-[#0f0f13] font-[Inter,sans-serif] text-white ${compact ? 'flex h-full min-h-0 flex-col overflow-hidden' : 'min-h-screen'}`}
     >
-      {!embedded && (
+      {!compact && (
         <>
           <div className="absolute top-0 right-0 -z-10 h-[500px] w-[500px] rounded-full bg-indigo-500/5 blur-[120px]" />
           <div className="absolute bottom-0 left-0 -z-10 h-[500px] w-[500px] rounded-full bg-violet-500/5 blur-[120px]" />
@@ -411,12 +730,14 @@ export default function SettingsApp({
 
       <div
         className={
-          embedded ? 'flex min-h-full flex-col' : 'mx-auto max-w-5xl px-6 py-12'
+          compact
+            ? 'flex min-h-0 flex-1 flex-col overflow-hidden'
+            : 'mx-auto max-w-5xl px-6 py-12'
         }
       >
         {/* Header */}
         <div
-          className={`flex items-center gap-3 ${embedded ? 'sticky top-0 z-10 border-b border-white/10 bg-[#0f0f13]/95 px-4 py-3 backdrop-blur' : 'mb-10 gap-4'}`}
+          className={`flex shrink-0 items-center gap-3 ${compact ? 'border-b border-white/10 bg-[#0f0f13] px-4 py-3' : 'mb-10 gap-4'}`}
         >
           {embedded && onBack && (
             <button
@@ -427,19 +748,19 @@ export default function SettingsApp({
               ← Back
             </button>
           )}
-          {!embedded && (
+          {!compact && (
             <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-violet-500 to-indigo-600 text-xl font-bold shadow-lg shadow-violet-500/10">
               J
             </div>
           )}
           <div className="min-w-0 flex-1">
             <h1
-              className={`font-bold tracking-tight ${embedded ? 'text-sm' : 'text-2xl'}`}
+              className={`font-bold tracking-tight ${compact ? 'text-sm' : 'text-2xl'}`}
             >
               {embedded ? 'Settings' : 'OpenJobKit'}
             </h1>
             <p className="truncate text-xs text-white/40">
-              {embedded ? (
+              {compact ? (
                 user.email
               ) : (
                 <>
@@ -461,7 +782,7 @@ export default function SettingsApp({
         {status && (
           <div
             className={`z-50 rounded-xl border px-4 py-3 text-sm shadow-xl backdrop-blur transition-all duration-300 ${
-              embedded ? 'mx-4 mt-3' : 'fixed top-6 right-6'
+              compact ? 'mx-4 mt-3' : 'fixed top-6 right-6'
             } ${
               status.type === 'success'
                 ? 'border-green-500/20 bg-green-500/10 text-green-300'
@@ -476,23 +797,23 @@ export default function SettingsApp({
 
         <div
           className={
-            embedded
-              ? 'flex flex-1 flex-col gap-3 px-4 py-4'
+            compact
+              ? 'flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-4 py-4'
               : 'grid grid-cols-1 gap-8 md:grid-cols-[220px_1fr]'
           }
         >
           {/* Navigation */}
           <nav
             className={
-              embedded
-                ? 'flex gap-1 rounded-xl border border-white/8 bg-white/5 p-1'
+              compact
+                ? 'flex shrink-0 gap-1 rounded-xl border border-white/8 bg-white/5 p-1'
                 : 'flex flex-col gap-1'
             }
           >
             <button
               onClick={() => setActiveTab('profile')}
               className={`flex items-center gap-2 rounded-lg text-sm font-medium transition-all ${
-                embedded
+                compact
                   ? 'flex-1 justify-center px-3 py-2'
                   : 'gap-3 rounded-xl px-4 py-3'
               } ${
@@ -501,12 +822,12 @@ export default function SettingsApp({
                   : 'text-white/60 hover:bg-white/5 hover:text-white'
               }`}
             >
-              <span>👤</span> {embedded ? 'Profile' : 'Resume Profile'}
+              <span>👤</span> {compact ? 'Profile' : 'Resume Profile'}
             </button>
             <button
               onClick={() => setActiveTab('ai')}
               className={`flex items-center gap-2 rounded-lg text-sm font-medium transition-all ${
-                embedded
+                compact
                   ? 'flex-1 justify-center px-3 py-2'
                   : 'gap-3 rounded-xl px-4 py-3'
               } ${
@@ -518,7 +839,7 @@ export default function SettingsApp({
               <span>🤖</span> AI
             </button>
 
-            {!embedded && (
+            {!compact && (
               <>
                 <button
                   onClick={handleSignOut}
@@ -543,7 +864,7 @@ export default function SettingsApp({
           {/* Tab Panes */}
           <div
             className={
-              embedded
+              compact
                 ? 'rounded-xl border border-white/8 bg-white/5 p-4'
                 : 'rounded-2xl border border-white/8 bg-white/5 p-6 backdrop-blur'
             }

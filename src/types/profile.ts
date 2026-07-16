@@ -29,10 +29,16 @@ export interface Skill {
 export interface UserProfile {
   // Personal Info
   firstName: string
+  middleName?: string
   lastName: string
+  preferredFirstName?: string
+  preferredMiddleName?: string
+  preferredLastName?: string
   email: string
   phone: string
+  phoneCountryCode?: string
   location: string
+  address?: string
   linkedinUrl?: string
   githubUrl?: string
   portfolioUrl?: string

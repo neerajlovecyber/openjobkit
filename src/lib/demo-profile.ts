@@ -10,10 +10,15 @@ import type { UserProfile } from '@/types/profile'
 export const DEMO_PROFILE: UserProfile = {
   // ── Personal Info ──────────────────────────────────────────────────────────
   firstName: 'Neeraj',
+  middleName: '',
   lastName: 'Singh',
+  preferredFirstName: 'Neeraj',
+  preferredLastName: 'Singh',
   email: 'neerajlovecyber@gmail.com',
-  phone: '+91 7988815263',
+  phone: '7988815263',
+  phoneCountryCode: '+91',
   location: 'Delhi NCR, India',
+  address: 'Delhi NCR, India',
   linkedinUrl: 'https://linkedin.com/in/neerajlovecyber',
   githubUrl: undefined,
   portfolioUrl: undefined,

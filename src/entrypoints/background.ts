@@ -37,64 +37,87 @@ export default defineBackground(() => {
     })
 
   const cleanup = onMessage({
-    // ── Content script detected a job form ──────────────────────────────────
+    // ── Content script detected a job form (ephemeral — not saved to tracker) ─
     DETECT_JOB: async (msg, sender) => {
       const { job } = msg.payload
-      const settings = await settingsStorage.get()
 
-      if (!settings.trackApplications) return
-
-      // Create a new application record
-      const application: JobApplication = {
+      // Reuse an existing tracker entry only if we already filled/failed this URL
+      const existing = await applicationsStorage.getOpenByJobUrl(job.url)
+      const applicationId = existing?.id ?? crypto.randomUUID()
+      const fullJob: JobApplication['job'] = existing?.job ?? {
+        ...job,
         id: crypto.randomUUID(),
-        job: {
-          ...job,
-          id: crypto.randomUUID(),
-          detectedAt: new Date().toISOString(),
-        },
-        status: 'detected',
+        detectedAt: new Date().toISOString(),
       }
 
-      await applicationsStorage.add(application)
-      console.log('[OpenJobKit] Detected job:', job.title, 'at', job.company)
-
-      // Store the active application mapping for this tab and frame
       if (sender.tab?.id) {
         await activeApplicationsStorage.set(sender.tab.id, {
-          applicationId: application.id,
+          applicationId,
           frameId: sender.frameId ?? 0,
+          job: {
+            ...fullJob,
+            title: job.title || fullJob.title,
+            company: job.company || fullJob.company,
+            location: job.location || fullJob.location,
+            description: job.description || fullJob.description,
+            url: job.url || fullJob.url,
+          },
         })
       }
 
-      return { applicationId: application.id }
+      console.log(
+        '[OpenJobKit] Form ready (not tracked until fill):',
+        job.title,
+        'at',
+        job.company,
+      )
+
+      return { applicationId }
     },
 
     // ── Content script requests AI fill for a job form ──────────────────────
-    FILL_JOB: async (msg, _sender) => {
+    FILL_JOB: async (msg, sender) => {
       const { applicationId, fields } = msg.payload
 
-      const [profile, settings, application] = await Promise.all([
+      const [profile, settings] = await Promise.all([
         profileStorage.get(),
         settingsStorage.get(),
-        applicationsStorage.getById(applicationId),
       ])
-
-      if (!application) {
-        throw new Error(`Application ${applicationId} not found.`)
-      }
 
       const apiKey = settings.ai.apiKey?.trim()
       if (!apiKey) {
-        const error =
-          'AI is not configured. Add an API key in OpenJobKit Settings → AI before autofill.'
-        await applicationsStorage.update(applicationId, {
-          status: 'failed',
-          error,
-        })
-        throw new Error(error)
+        throw new Error(
+          'AI is not configured. Add an API key in OpenJobKit Settings → AI before autofill.',
+        )
       }
 
-      await applicationsStorage.update(applicationId, { status: 'filling' })
+      // Resolve job: InstantDB record, or ephemeral tab mapping from DETECT_JOB
+      let application = await applicationsStorage.getById(applicationId)
+      const active =
+        sender.tab?.id != null
+          ? await activeApplicationsStorage.get(sender.tab.id)
+          : null
+      const jobFromSession =
+        active?.applicationId === applicationId ? active.job : null
+
+      if (!application) {
+        if (!jobFromSession) {
+          throw new Error(
+            'No job context for this page. Refresh and try autofill again.',
+          )
+        }
+        application = {
+          id: applicationId,
+          job: jobFromSession,
+          status: 'filling',
+        }
+        // Persist only when the user actually runs autofill
+        if (settings.trackApplications) {
+          await applicationsStorage.add(application)
+        }
+      } else if (settings.trackApplications) {
+        await applicationsStorage.update(applicationId, { status: 'filling' })
+      }
 
       try {
         // 1. Resolve standard fields locally from profile (AI must still be configured)
@@ -147,18 +170,32 @@ export default defineBackground(() => {
           }
         }
 
-        await applicationsStorage.update(applicationId, {
-          status: 'filled',
-          aiGeneratedAnswers: answers,
-          coverLetter,
-        })
+        if (settings.trackApplications) {
+          await applicationsStorage.update(applicationId, {
+            status: 'filled',
+            aiGeneratedAnswers: answers,
+            coverLetter,
+          })
+        }
 
         return { answers, coverLetter }
       } catch (error) {
-        await applicationsStorage.update(applicationId, {
-          status: 'failed',
-          error: String(error),
-        })
+        if (settings.trackApplications) {
+          const existing = await applicationsStorage.getById(applicationId)
+          if (existing) {
+            await applicationsStorage.update(applicationId, {
+              status: 'failed',
+              error: String(error),
+            })
+          } else if (jobFromSession || application.job) {
+            await applicationsStorage.add({
+              id: applicationId,
+              job: jobFromSession ?? application.job,
+              status: 'failed',
+              error: String(error),
+            })
+          }
+        }
         throw error
       }
     },
@@ -166,11 +203,80 @@ export default defineBackground(() => {
     // ── User submitted the application ──────────────────────────────────────
     SUBMIT_JOB: async (msg) => {
       const { applicationId } = msg.payload
+      const existing = await applicationsStorage.getById(applicationId)
+      if (!existing) return
       await applicationsStorage.update(applicationId, {
         status: 'applied',
         appliedAt: new Date().toISOString(),
       })
       console.log('[OpenJobKit] Application submitted:', applicationId)
+    },
+
+    // ── Open autofill settings as a page overlay modal (Jobright-style) ─────
+    OPEN_AUTOFILL_MODAL: async (msg) => {
+      const tab = msg.payload?.tab ?? 'profile'
+      const modalUrl = browser.runtime.getURL(
+        `/autofill-modal.html?tab=${tab}` as `/autofill-modal.html${string}`,
+      )
+
+      const [active] = await browser.tabs.query({
+        active: true,
+        currentWindow: true,
+      })
+
+      const url = active?.url ?? ''
+      const canInject =
+        !!active?.id &&
+        !url.startsWith('chrome://') &&
+        !url.startsWith('chrome-extension://') &&
+        !url.startsWith('edge://') &&
+        !url.startsWith('about:') &&
+        !url.startsWith('devtools://')
+
+      if (!canInject || active.id == null) {
+        await browser.windows.create({
+          url: modalUrl,
+          type: 'popup',
+          width: 920,
+          height: 760,
+        })
+        return
+      }
+
+      try {
+        await browser.scripting.executeScript({
+          target: { tabId: active.id },
+          func: injectAutofillModalOverlay,
+          args: [modalUrl],
+        })
+      } catch (err) {
+        console.warn(
+          '[OpenJobKit] Page inject failed, falling back to popup window:',
+          err,
+        )
+        await browser.windows.create({
+          url: modalUrl,
+          type: 'popup',
+          width: 920,
+          height: 760,
+        })
+      }
+    },
+
+    CLOSE_AUTOFILL_MODAL: async () => {
+      const [active] = await browser.tabs.query({
+        active: true,
+        currentWindow: true,
+      })
+      if (!active?.id) return
+      try {
+        await browser.scripting.executeScript({
+          target: { tabId: active.id },
+          func: removeAutofillModalOverlay,
+        })
+      } catch {
+        // Tab may not allow scripting (chrome:// etc.)
+      }
     },
 
     // ── Trigger fill on the active tab's detected form frame ────────────────
@@ -573,4 +679,66 @@ function matchMonthOption(options: Array<string>, monthNumStr: string): string {
     }
   }
   return options[0] || '' // Fallback
+}
+
+/** Injected into the page — must stay self-contained (no imports). */
+function injectAutofillModalOverlay(modalUrl: string) {
+  const ROOT_ID = 'ojk-autofill-modal-root'
+  document.getElementById(ROOT_ID)?.remove()
+
+  const root = document.createElement('div')
+  root.id = ROOT_ID
+  Object.assign(root.style, {
+    position: 'fixed',
+    inset: '0',
+    zIndex: '2147483646',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: '24px',
+    boxSizing: 'border-box',
+    background: 'rgba(15, 15, 19, 0.55)',
+    backdropFilter: 'blur(2px)',
+  })
+
+  const frame = document.createElement('iframe')
+  frame.src = modalUrl
+  frame.title = 'Your Autofill information'
+  frame.allow = 'clipboard-write'
+  Object.assign(frame.style, {
+    width: 'min(920px, calc(100vw - 48px))',
+    height: 'min(720px, calc(100vh - 48px))',
+    border: 'none',
+    borderRadius: '16px',
+    boxShadow: '0 25px 50px -12px rgba(0,0,0,0.45)',
+    background: '#0f0f13',
+    overflow: 'hidden',
+  })
+
+  root.addEventListener('click', (event) => {
+    if (event.target === root) {
+      // Runs in an isolated world — use the MV3 chrome API directly
+      const ext = (
+        globalThis as typeof globalThis & {
+          chrome?: { runtime: { sendMessage: (msg: unknown) => void } }
+          browser?: { runtime: { sendMessage: (msg: unknown) => void } }
+        }
+      ).chrome
+      const runtime =
+        ext?.runtime ??
+        (
+          globalThis as typeof globalThis & {
+            browser?: { runtime: { sendMessage: (msg: unknown) => void } }
+          }
+        ).browser?.runtime
+      runtime?.sendMessage({ type: 'CLOSE_AUTOFILL_MODAL' })
+    }
+  })
+
+  root.appendChild(frame)
+  document.documentElement.appendChild(root)
+}
+
+function removeAutofillModalOverlay() {
+  document.getElementById('ojk-autofill-modal-root')?.remove()
 }

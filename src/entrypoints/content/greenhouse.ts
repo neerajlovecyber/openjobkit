@@ -36,11 +36,17 @@ export function initGreenhouse(ctx: ContentScriptContext) {
       const form = document.querySelector<HTMLFormElement>(
         '#application_form, form[data-qa="application-form"], form',
       )
-      if (form) {
-        form.removeAttribute('data-ojk-detected')
-        delete form.dataset.ojkDetected
-        void handleGreenhouseForm(form)
+      if (!form) return
+      // Already wired — don't clear detection (that caused duplicate apps)
+      if (form.dataset.ojkDetected) {
+        if (!document.getElementById('ojk-fill-btn')) {
+          // Button missing after navigation; re-register without resetting flag
+          delete form.dataset.ojkDetected
+          void handleGreenhouseForm(form)
+        }
+        return
       }
+      void handleGreenhouseForm(form)
     },
     TRIGGER_FILL: async (msg) => {
       const { applicationId } = msg.payload

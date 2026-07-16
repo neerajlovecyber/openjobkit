@@ -53,6 +53,19 @@ export interface UpdateStatusMessage {
   }
 }
 
+/** Popup / Sidepanel → Background: open autofill settings modal on the page */
+export interface OpenAutofillModalMessage {
+  type: 'OPEN_AUTOFILL_MODAL'
+  payload?: {
+    tab?: 'profile' | 'ai'
+  }
+}
+
+/** Modal iframe / backdrop → Background: remove the page overlay */
+export interface CloseAutofillModalMessage {
+  type: 'CLOSE_AUTOFILL_MODAL'
+}
+
 /** Popup → Background: trigger fill on the active tab */
 export interface TriggerFillActiveTabMessage {
   type: 'TRIGGER_FILL_ACTIVE_TAB'
@@ -87,6 +100,8 @@ export type ExtensionMessage =
   | FillAnswersMessage
   | SubmitJobMessage
   | UpdateStatusMessage
+  | OpenAutofillModalMessage
+  | CloseAutofillModalMessage
   | TriggerFillActiveTabMessage
   | TriggerFillMessage
   | PingMessage

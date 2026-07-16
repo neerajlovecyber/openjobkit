@@ -1,13 +1,10 @@
 import React, { useEffect, useState } from 'react'
 
-import SettingsApp from '@/components/SettingsApp'
 import SignIn from '@/components/SignIn'
 import { db } from '@/lib/db'
 import { sendToBackground } from '@/lib/messaging'
-import { takeSidepanelView } from '@/lib/sidepanel'
-import { activeApplicationsStorage } from '@/lib/storage'
+import { activeApplicationsStorage, applicationsStorage } from '@/lib/storage'
 
-import type { SidepanelView } from '@/lib/sidepanel'
 import type { JobApplication } from '@/types/job'
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -76,7 +73,6 @@ type TabState =
 
 export default function App() {
   const { isLoading: isAuthLoading, user, error: authError } = db.useAuth()
-  const [view, setView] = useState<SidepanelView>('home')
   const [filter, setFilter] = useState<JobApplication['status'] | 'all'>('all')
   const [tabState, setTabState] = useState<TabState>({ status: 'loading' })
   const [fillBusy, setFillBusy] = useState(false)
@@ -92,14 +88,8 @@ export default function App() {
   )
 
   useEffect(() => {
-    void takeSidepanelView().then(setView)
-  }, [])
-
-  useEffect(() => {
-    if (user && view === 'home') {
-      void loadCurrentTab()
-    }
-  }, [user, view])
+    if (user) void loadCurrentTab()
+  }, [user])
 
   async function loadCurrentTab() {
     try {
@@ -163,9 +153,39 @@ export default function App() {
     }
   }
 
+  async function openAutofillModal(tab: 'profile' | 'ai' = 'profile') {
+    try {
+      await sendToBackground({
+        type: 'OPEN_AUTOFILL_MODAL',
+        payload: { tab },
+      })
+    } catch (e) {
+      setTabState({
+        status: 'error',
+        message: e instanceof Error ? e.message : String(e),
+      })
+    }
+  }
+
+  async function handleClearApplications() {
+    if (applications.length === 0) return
+    const ok = window.confirm(
+      `Clear all ${applications.length} tracked applications? This cannot be undone.`,
+    )
+    if (!ok) return
+    try {
+      await applicationsStorage.clear()
+    } catch (e) {
+      setTabState({
+        status: 'error',
+        message: e instanceof Error ? e.message : String(e),
+      })
+    }
+  }
+
   if (isAuthLoading) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-[#0f0f13] text-sm text-white/50">
+      <div className="flex h-full items-center justify-center bg-[#0f0f13] text-sm text-white/50">
         Loading…
       </div>
     )
@@ -173,7 +193,7 @@ export default function App() {
 
   if (authError) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-[#0f0f13] px-4 text-center text-sm text-red-400">
+      <div className="flex h-full items-center justify-center bg-[#0f0f13] px-4 text-center text-sm text-red-400">
         Auth Error: {authError.message}
       </div>
     )
@@ -181,14 +201,10 @@ export default function App() {
 
   if (!user) {
     return (
-      <div className="min-h-screen bg-[#0f0f13]">
+      <div className="ojk-scroll h-full overflow-y-auto bg-[#0f0f13]">
         <SignIn compact />
       </div>
     )
-  }
-
-  if (view === 'settings') {
-    return <SettingsApp embedded onBack={() => setView('home')} />
   }
 
   const applications = data?.applications.map(rowToApp) ?? []
@@ -205,11 +221,16 @@ export default function App() {
     {} as Record<string, number>,
   )
 
+  const needsAi =
+    tabState.status === 'error' &&
+    tabState.message.toLowerCase().includes('api key')
+
   return (
-    <div className="flex min-h-screen flex-col bg-[#0f0f13] font-[Inter,sans-serif] text-white">
-      <header className="sticky top-0 z-10 border-b border-white/10 bg-[#0f0f13]/90 px-4 py-3 backdrop-blur">
-        <div className="mb-3 flex items-center gap-2.5">
-          <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-violet-500 to-indigo-600 text-sm font-bold">
+    <div className="flex h-full flex-col overflow-hidden bg-[#0f0f13] font-[Inter,sans-serif] text-white">
+      {/* Top chrome — fixed, never scrolls */}
+      <header className="shrink-0 px-4 pt-3 pb-2">
+        <div className="flex items-center gap-2.5">
+          <div className="flex size-8 items-center justify-center rounded-lg bg-gradient-to-br from-violet-500 to-indigo-600 text-sm font-bold">
             J
           </div>
           <div className="min-w-0 flex-1">
@@ -219,84 +240,118 @@ export default function App() {
           <button
             type="button"
             aria-label="Settings"
-            onClick={() => setView('settings')}
-            className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 text-xs text-white/70 transition-colors hover:bg-white/10 hover:text-white"
+            onClick={() => void openAutofillModal('ai')}
+            className="flex size-8 items-center justify-center rounded-lg text-white/50 transition-colors hover:bg-white/8 hover:text-white"
           >
-            Settings
+            ⚙
           </button>
         </div>
-
-        <PageStatus
-          state={tabState}
-          fillBusy={fillBusy}
-          onFill={handleFillPage}
-          onOpenSettings={() => setView('settings')}
-        />
       </header>
 
-      <div className="border-b border-white/8 px-4 py-2.5">
-        <div className="mb-2 flex items-center justify-between">
-          <p className="text-[11px] font-medium tracking-wider text-white/40 uppercase">
-            Applications
-          </p>
-          <span className="text-[10px] text-white/30">
-            {applications.length} total
-          </span>
-        </div>
-        <div className="flex flex-wrap gap-1.5">
-          {(
-            [
-              ['all', 'All', applications.length],
-              ['applied', 'Applied', counts.applied ?? 0],
-              ['filled', 'Filled', counts.filled ?? 0],
-              ['failed', 'Failed', counts.failed ?? 0],
-            ] as const
-          ).map(([val, label, count]) => (
-            <button
-              key={val}
-              type="button"
-              onClick={() => setFilter(val as typeof filter)}
-              className={`rounded-full border px-2.5 py-1 text-xs font-medium transition-all ${
-                filter === val
-                  ? 'border-violet-500 bg-violet-600 text-white'
-                  : 'border-white/10 bg-white/5 text-white/60 hover:bg-white/10'
-              }`}
-            >
-              {label} {count}
-            </button>
-          ))}
+      <div className="shrink-0 space-y-3 px-4 pb-3">
+        <PageBanner state={tabState} />
+
+        <button
+          type="button"
+          disabled={fillBusy || tabState.status === 'unsupported'}
+          onClick={() => void handleFillPage()}
+          className="w-full rounded-xl bg-gradient-to-r from-violet-600 to-indigo-600 py-2.5 text-sm font-semibold text-white shadow-lg shadow-violet-600/20 transition-all hover:from-violet-500 hover:to-indigo-500 disabled:cursor-not-allowed disabled:opacity-45 disabled:shadow-none"
+        >
+          {fillBusy ? 'Filling…' : '+ Autofill This Page'}
+        </button>
+
+        {needsAi && (
+          <button
+            type="button"
+            onClick={() => void openAutofillModal('ai')}
+            className="w-full rounded-lg border border-violet-500/30 bg-violet-500/10 py-2 text-xs font-semibold text-violet-200 hover:bg-violet-500/20"
+          >
+            Configure AI to enable autofill
+          </button>
+        )}
+
+        <div className="overflow-hidden rounded-xl border border-white/10 bg-white/[0.03]">
+          <MenuRow
+            title="Your Autofill Information"
+            subtitle="Profile, resume & answers"
+            onClick={() => void openAutofillModal('profile')}
+          />
+          <MenuRow
+            title="AI Settings"
+            subtitle="Provider, API key & model"
+            onClick={() => void openAutofillModal('ai')}
+            last
+          />
         </div>
       </div>
 
-      <main className="flex-1 space-y-2 overflow-y-auto px-3 py-3">
-        {isDataLoading ? (
-          <div className="flex h-40 items-center justify-center text-sm text-white/30">
-            Loading…
+      {/* Applications — only this region scrolls */}
+      <div className="flex min-h-0 flex-1 flex-col border-t border-white/8">
+        <div className="shrink-0 px-4 pt-3 pb-2">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <p className="text-[11px] font-medium tracking-wider text-white/40 uppercase">
+              Applications
+            </p>
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] text-white/30">
+                {applications.length}
+              </span>
+              {applications.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => void handleClearApplications()}
+                  className="text-[10px] font-medium text-white/35 transition-colors hover:text-red-400"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
           </div>
-        ) : filtered.length === 0 ? (
-          <EmptyState filter={filter} />
-        ) : (
-          filtered.map((app) => <ApplicationRow key={app.id} app={app} />)
-        )}
-      </main>
+          <div className="ojk-scroll-hide flex gap-1.5 overflow-x-auto pb-0.5">
+            {(
+              [
+                ['all', 'All', applications.length],
+                ['applied', 'Applied', counts.applied ?? 0],
+                ['filled', 'Filled', counts.filled ?? 0],
+                ['failed', 'Failed', counts.failed ?? 0],
+              ] as const
+            ).map(([val, label, count]) => (
+              <button
+                key={val}
+                type="button"
+                onClick={() => setFilter(val as typeof filter)}
+                className={`shrink-0 rounded-full border px-2.5 py-1 text-xs font-medium transition-all ${
+                  filter === val
+                    ? 'border-violet-500 bg-violet-600 text-white'
+                    : 'border-white/10 bg-white/5 text-white/60 hover:bg-white/10'
+                }`}
+              >
+                {label} {count}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <main className="ojk-scroll min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain px-3 pb-3">
+          {isDataLoading ? (
+            <div className="flex h-32 items-center justify-center text-sm text-white/30">
+              Loading…
+            </div>
+          ) : filtered.length === 0 ? (
+            <EmptyState filter={filter} />
+          ) : (
+            filtered.map((app) => <ApplicationRow key={app.id} app={app} />)
+          )}
+        </main>
+      </div>
     </div>
   )
 }
 
-function PageStatus({
-  state,
-  fillBusy,
-  onFill,
-  onOpenSettings,
-}: {
-  state: TabState
-  fillBusy: boolean
-  onFill: () => void
-  onOpenSettings: () => void
-}) {
+function PageBanner({ state }: { state: TabState }) {
   if (state.status === 'loading') {
     return (
-      <div className="rounded-xl border border-white/8 bg-white/5 p-3 text-center text-xs text-white/40">
+      <div className="rounded-lg border border-white/8 bg-white/5 px-3 py-2 text-center text-xs text-white/40">
         Detecting page…
       </div>
     )
@@ -304,55 +359,57 @@ function PageStatus({
 
   if (state.status === 'unsupported') {
     return (
-      <div className="rounded-xl border border-white/8 bg-white/5 p-3">
-        <p className="text-center text-xs text-white/50">
-          Not a supported job page
-        </p>
-        <p className="mt-1 text-center text-[11px] text-white/30">
-          Open LinkedIn, Indeed, Greenhouse, or Lever
-        </p>
+      <div className="flex items-center justify-between gap-2 rounded-lg border border-white/8 bg-white/5 px-3 py-2 text-xs">
+        <span className="text-white/60">Autofill not supported here</span>
+        <span className="shrink-0 text-white/30">Open a job page</span>
       </div>
     )
   }
 
   if (state.status === 'error') {
-    const needsAi = state.message.toLowerCase().includes('api key')
     return (
-      <div className="rounded-xl border border-red-500/20 bg-red-500/10 p-3">
-        <p className="text-xs text-red-300">{state.message}</p>
-        {needsAi && (
-          <button
-            type="button"
-            onClick={onOpenSettings}
-            className="mt-2 w-full rounded-lg bg-violet-600 py-1.5 text-xs font-semibold text-white hover:bg-violet-500"
-          >
-            Open AI Settings
-          </button>
-        )}
+      <div className="rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-300">
+        {state.message}
       </div>
     )
   }
 
   const platformLabel = PLATFORM_LABELS[state.platform] ?? state.platform
-
   return (
-    <div className="rounded-xl border border-white/8 bg-white/5 p-3">
-      <div className="mb-2 flex items-center gap-2">
-        <span className="h-2 w-2 animate-pulse rounded-full bg-green-400" />
-        <span className="text-xs font-medium text-white/80">
-          {platformLabel} detected
-        </span>
-      </div>
-      <p className="mb-3 truncate text-[11px] text-white/40">{state.url}</p>
-      <button
-        type="button"
-        disabled={fillBusy}
-        onClick={onFill}
-        className="w-full rounded-lg bg-gradient-to-r from-violet-600 to-indigo-600 py-2 text-sm font-semibold text-white transition-all hover:from-violet-500 hover:to-indigo-500 disabled:opacity-60"
-      >
-        {fillBusy ? 'Filling…' : 'Fill This Page'}
-      </button>
+    <div className="flex items-center gap-2 rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-200">
+      <span className="size-1.5 animate-pulse rounded-full bg-emerald-400" />
+      {platformLabel} ready
     </div>
+  )
+}
+
+function MenuRow({
+  title,
+  subtitle,
+  onClick,
+  last = false,
+}: {
+  title: string
+  subtitle: string
+  onClick: () => void
+  last?: boolean
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`flex w-full items-center gap-3 px-3.5 py-3 text-left transition-colors hover:bg-white/[0.06] ${
+        last ? '' : 'border-b border-white/8'
+      }`}
+    >
+      <span className="min-w-0 flex-1">
+        <span className="block text-sm font-medium text-white/90">{title}</span>
+        <span className="block text-[11px] text-white/40">{subtitle}</span>
+      </span>
+      <span className="text-white/25" aria-hidden>
+        ›
+      </span>
+    </button>
   )
 }
 
@@ -364,13 +421,13 @@ function ApplicationRow({ app }: { app: JobApplication }) {
       : null
 
   return (
-    <div className="rounded-xl border border-white/8 bg-white/5 p-3 transition-colors hover:bg-white/8">
-      <div className="mb-2 flex items-start justify-between gap-2">
+    <div className="rounded-xl border border-white/8 bg-white/[0.03] px-3 py-2.5 transition-colors hover:bg-white/[0.06]">
+      <div className="flex items-start justify-between gap-2">
         <div className="min-w-0 flex-1">
           <p className="truncate text-sm leading-tight font-medium">
             {app.job.title}
           </p>
-          <p className="mt-0.5 truncate text-xs text-white/50">
+          <p className="mt-0.5 truncate text-xs text-white/45">
             {app.job.company}
           </p>
         </div>
@@ -381,18 +438,12 @@ function ApplicationRow({ app }: { app: JobApplication }) {
         </span>
       </div>
 
-      <div className="flex items-center gap-2 text-[11px] text-white/35">
+      <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-white/30">
         <span className="capitalize">{app.job.platform}</span>
-        {app.job.location && (
-          <>
-            <span>·</span>
-            <span className="truncate">{app.job.location}</span>
-          </>
-        )}
         {timeAgo && (
           <>
             <span>·</span>
-            <span className="ml-auto shrink-0">{timeAgo}</span>
+            <span>{timeAgo}</span>
           </>
         )}
       </div>
@@ -408,18 +459,13 @@ function ApplicationRow({ app }: { app: JobApplication }) {
 
 function EmptyState({ filter }: { filter: string }) {
   return (
-    <div className="flex h-52 flex-col items-center justify-center gap-3 px-6 text-center">
-      <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-white/10 bg-white/5 text-lg text-white/40">
-        ∅
-      </div>
-      <div>
-        <p className="text-sm font-semibold">No applications found</p>
-        <p className="mt-1 text-xs text-white/30">
-          {filter === 'all'
-            ? 'Start applying to jobs to see tracker cards here.'
-            : `No jobs marked as '${filter}' currently.`}
-        </p>
-      </div>
+    <div className="flex h-36 flex-col items-center justify-center gap-1.5 px-6 text-center">
+      <p className="text-sm font-semibold text-white/80">No applications yet</p>
+      <p className="text-xs text-white/30">
+        {filter === 'all'
+          ? 'Apply to jobs to see them tracked here.'
+          : `No jobs marked as '${filter}'.`}
+      </p>
     </div>
   )
 }
