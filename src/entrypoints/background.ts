@@ -353,7 +353,211 @@ function resolveFieldsLocally(
     else if (label.includes('sponsor') || label.includes('visa')) {
       answers[field.id] = 'No'
     }
+    // Education: School / Institution
+    else if (
+      label.includes('school') ||
+      label.includes('university') ||
+      label.includes('institution')
+    ) {
+      const edu = profile.education?.[0]
+      if (edu) {
+        if (field.type === 'select' && field.options) {
+          answers[field.id] = fuzzyMatchOption(field.options, edu.institution)
+        } else {
+          answers[field.id] = edu.institution
+        }
+      }
+    }
+    // Education: Degree
+    else if (label.includes('degree')) {
+      const edu = profile.education?.[0]
+      if (edu) {
+        if (field.type === 'select' && field.options) {
+          answers[field.id] = fuzzyMatchOption(field.options, edu.degree)
+        } else {
+          answers[field.id] = edu.degree
+        }
+      }
+    }
+    // Education: Discipline / Major / Field
+    else if (
+      label.includes('discipline') ||
+      label.includes('major') ||
+      label.includes('field of study') ||
+      label.includes('department')
+    ) {
+      const edu = profile.education?.[0]
+      if (edu) {
+        if (field.type === 'select' && field.options) {
+          answers[field.id] = fuzzyMatchOption(field.options, edu.field)
+        } else {
+          answers[field.id] = edu.field
+        }
+      }
+    }
+    // Education Start Month
+    else if (
+      label.includes('start') &&
+      (label.includes('month') || label.includes('mo'))
+    ) {
+      const edu = profile.education?.[0]
+      if (edu?.startDate) {
+        const parts = edu.startDate.split('-')
+        const monthNum = parts[1] || '01'
+        if (field.type === 'select' && field.options) {
+          answers[field.id] = matchMonthOption(field.options, monthNum)
+        } else {
+          answers[field.id] = monthNum
+        }
+      }
+    }
+    // Education Start Year
+    else if (
+      label.includes('start') &&
+      (label.includes('year') || label.includes('yr'))
+    ) {
+      const edu = profile.education?.[0]
+      if (edu?.startDate) {
+        const parts = edu.startDate.split('-')
+        const year = parts[0]
+        if (field.type === 'select' && field.options) {
+          answers[field.id] =
+            field.options.find((o) => o.includes(year)) || year
+        } else {
+          answers[field.id] = year
+        }
+      }
+    }
+    // Education End Month
+    else if (
+      (label.includes('end') || label.includes('grad')) &&
+      (label.includes('month') || label.includes('mo'))
+    ) {
+      const edu = profile.education?.[0]
+      const endDate = edu?.endDate || new Date().toISOString().substring(0, 7)
+      const parts = endDate.split('-')
+      const monthNum = parts[1] || '01'
+      if (field.type === 'select' && field.options) {
+        answers[field.id] = matchMonthOption(field.options, monthNum)
+      } else {
+        answers[field.id] = monthNum
+      }
+    }
+    // Education End Year
+    else if (
+      (label.includes('end') || label.includes('grad')) &&
+      (label.includes('year') || label.includes('yr'))
+    ) {
+      const edu = profile.education?.[0]
+      const endDate = edu?.endDate || new Date().toISOString().substring(0, 7)
+      const parts = endDate.split('-')
+      const year = parts[0]
+      if (field.type === 'select' && field.options) {
+        answers[field.id] = field.options.find((o) => o.includes(year)) || year
+      } else {
+        answers[field.id] = year
+      }
+    }
   }
 
   return answers
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Option Matching Helper Functions
+// ────────────────────────────────────────────────────────────────────────────
+
+function fuzzyMatchOption(options: Array<string>, target: string): string {
+  const targetLower = target.toLowerCase()
+
+  // 1. Exact or starts-with match
+  for (const opt of options) {
+    const oLower = opt.toLowerCase()
+    if (
+      oLower === targetLower ||
+      oLower.includes(targetLower) ||
+      targetLower.includes(oLower)
+    ) {
+      return opt
+    }
+  }
+
+  // 2. Acronym or common abbreviations match (e.g. "B.Tech" or "Bachelor of Technology")
+  if (
+    targetLower.includes('bachelor') ||
+    targetLower.includes('b.tech') ||
+    targetLower.includes('b.s.')
+  ) {
+    for (const opt of options) {
+      const oLower = opt.toLowerCase()
+      if (
+        (oLower.includes('bachelor') ||
+          oLower.includes('b.s') ||
+          oLower.includes('b.tech') ||
+          oLower.includes('b.a')) &&
+        ((targetLower.includes('tech') && oLower.includes('tech')) ||
+          (targetLower.includes('science') && oLower.includes('science')) ||
+          (targetLower.includes('engineering') &&
+            oLower.includes('engineering')))
+      ) {
+        return opt
+      }
+    }
+  }
+
+  // 3. Fallback to first non-empty option
+  return options[0] || target
+}
+
+function matchMonthOption(options: Array<string>, monthNumStr: string): string {
+  const monthsShort = [
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec',
+  ]
+  const monthsFull = [
+    'January',
+    'February',
+    'March',
+    'April',
+    'May',
+    'June',
+    'July',
+    'August',
+    'September',
+    'October',
+    'November',
+    'December',
+  ]
+
+  const mIndex = parseInt(monthNumStr, 10) - 1 // 0-based index
+  if (isNaN(mIndex) || mIndex < 0 || mIndex > 11) return ''
+
+  const shortName = monthsShort[mIndex].toLowerCase()
+  const fullName = monthsFull[mIndex].toLowerCase()
+  const numericValue = String(mIndex + 1)
+  const paddedNumericValue = monthNumStr // '08'
+
+  for (const opt of options) {
+    const oLower = opt.toLowerCase()
+    if (
+      oLower === shortName ||
+      oLower === fullName ||
+      oLower === numericValue ||
+      oLower === paddedNumericValue ||
+      oLower.startsWith(shortName)
+    ) {
+      return opt
+    }
+  }
+  return options[0] || '' // Fallback
 }
