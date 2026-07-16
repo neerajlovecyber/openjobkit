@@ -18,6 +18,7 @@ export default defineConfig({
     host_permissions: [
       '*://*.linkedin.com/*',
       '*://*.indeed.com/*',
+      '*://job-boards.greenhouse.io/*',
       '*://boards.greenhouse.io/*',
       '*://*.greenhouse.io/*',
       '*://*.lever.co/*',

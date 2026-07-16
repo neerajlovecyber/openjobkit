@@ -2,6 +2,7 @@
 // All reads/writes go through these helpers to ensure type safety and
 // consistent error handling across background, popup, content, and options.
 
+import { DEMO_PROFILE } from '@/lib/demo-profile'
 import { DEFAULT_SETTINGS } from '@/types/settings'
 
 import type { JobApplication } from '@/types/job'
@@ -42,12 +43,14 @@ async function storageRemove(key: StorageKey): Promise<void> {
 // ────────────────────────────────────────────────────────────────────────────
 
 export const profileStorage = {
-  get: () => storageGet<UserProfile>(STORAGE_KEYS.PROFILE),
+  // Returns stored profile, or DEMO_PROFILE as fallback until real profile editor is built
+  get: async (): Promise<UserProfile> => {
+    const stored = await storageGet<UserProfile>(STORAGE_KEYS.PROFILE)
+    return stored ?? DEMO_PROFILE
+  },
   set: (profile: UserProfile) => storageSet(STORAGE_KEYS.PROFILE, profile),
   update: async (partial: Partial<UserProfile>) => {
     const existing = await profileStorage.get()
-    if (!existing)
-      throw new Error('No profile found. Please set up your profile first.')
     await profileStorage.set({ ...existing, ...partial })
   },
   clear: () => storageRemove(STORAGE_KEYS.PROFILE),

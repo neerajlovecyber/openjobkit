@@ -61,11 +61,6 @@ export default defineBackground(() => {
         applicationsStorage.getById(applicationId),
       ])
 
-      if (!profile) {
-        throw new Error(
-          'No profile found. Please complete your profile in the Options page.',
-        )
-      }
       if (!application) {
         throw new Error(`Application ${applicationId} not found.`)
       }
