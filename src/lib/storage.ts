@@ -40,6 +40,70 @@ async function storageRemove(key: StorageKey): Promise<void> {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// Supabase Cloud Synchronization Helpers
+// ────────────────────────────────────────────────────────────────────────────
+
+async function syncProfileToSupabase(profile: UserProfile): Promise<void> {
+  try {
+    const settings = await settingsStorage.get()
+    if (
+      settings.supabase.syncToSupabase &&
+      settings.supabase.supabaseUrl &&
+      settings.supabase.supabaseAnonKey
+    ) {
+      const { pushProfileToSupabase } = await import('@/lib/supabase')
+      await pushProfileToSupabase(
+        settings.supabase.supabaseUrl,
+        settings.supabase.supabaseAnonKey,
+        profile,
+      )
+    }
+  } catch (err) {
+    console.error('[OpenJobKit] Background profile sync failed:', err)
+  }
+}
+
+async function syncAppToSupabase(app: JobApplication): Promise<void> {
+  try {
+    const settings = await settingsStorage.get()
+    if (
+      settings.supabase.syncToSupabase &&
+      settings.supabase.supabaseUrl &&
+      settings.supabase.supabaseAnonKey
+    ) {
+      const { pushApplicationToSupabase } = await import('@/lib/supabase')
+      await pushApplicationToSupabase(
+        settings.supabase.supabaseUrl,
+        settings.supabase.supabaseAnonKey,
+        app,
+      )
+    }
+  } catch (err) {
+    console.error('[OpenJobKit] Background application sync failed:', err)
+  }
+}
+
+async function deleteAppFromSupabase(id: string): Promise<void> {
+  try {
+    const settings = await settingsStorage.get()
+    if (
+      settings.supabase.syncToSupabase &&
+      settings.supabase.supabaseUrl &&
+      settings.supabase.supabaseAnonKey
+    ) {
+      const { deleteApplicationFromSupabase } = await import('@/lib/supabase')
+      await deleteApplicationFromSupabase(
+        settings.supabase.supabaseUrl,
+        settings.supabase.supabaseAnonKey,
+        id,
+      )
+    }
+  } catch (err) {
+    console.error('[OpenJobKit] Background application delete failed:', err)
+  }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // Profile
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -49,10 +113,15 @@ export const profileStorage = {
     const stored = await storageGet<UserProfile>(STORAGE_KEYS.PROFILE)
     return stored ?? DEMO_PROFILE
   },
-  set: (profile: UserProfile) => storageSet(STORAGE_KEYS.PROFILE, profile),
-  update: async (partial: Partial<UserProfile>) => {
+  set: async (profile: UserProfile): Promise<void> => {
+    await storageSet(STORAGE_KEYS.PROFILE, profile)
+    void syncProfileToSupabase(profile)
+  },
+  update: async (partial: Partial<UserProfile>): Promise<void> => {
     const existing = await profileStorage.get()
-    await profileStorage.set({ ...existing, ...partial })
+    const updated = { ...existing, ...partial }
+    await storageSet(STORAGE_KEYS.PROFILE, updated)
+    void syncProfileToSupabase(updated)
   },
   clear: () => storageRemove(STORAGE_KEYS.PROFILE),
 }
@@ -98,6 +167,7 @@ export const applicationsStorage = {
     // Prepend new application and respect max history cap
     const updated = [application, ...all].slice(0, settings.maxHistoryItems)
     await storageSet(STORAGE_KEYS.APPLICATIONS, updated)
+    void syncAppToSupabase(application)
   },
 
   update: async (
@@ -105,8 +175,18 @@ export const applicationsStorage = {
     partial: Partial<JobApplication>,
   ): Promise<void> => {
     const all = await applicationsStorage.getAll()
-    const updated = all.map((a) => (a.id === id ? { ...a, ...partial } : a))
+    let updatedApp: JobApplication | undefined
+    const updated = all.map((a) => {
+      if (a.id === id) {
+        updatedApp = { ...a, ...partial }
+        return updatedApp
+      }
+      return a
+    })
     await storageSet(STORAGE_KEYS.APPLICATIONS, updated)
+    if (updatedApp) {
+      void syncAppToSupabase(updatedApp)
+    }
   },
 
   remove: async (id: string): Promise<void> => {
@@ -115,6 +195,7 @@ export const applicationsStorage = {
       STORAGE_KEYS.APPLICATIONS,
       all.filter((a) => a.id !== id),
     )
+    void deleteAppFromSupabase(id)
   },
 
   clear: () => storageRemove(STORAGE_KEYS.APPLICATIONS),

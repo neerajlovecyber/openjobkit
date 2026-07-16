@@ -28,9 +28,6 @@ export default defineConfig({
     action: {
       default_title: 'OpenJobKit',
     },
-    side_panel: {
-      default_path: 'sidepanel/index.html',
-    },
   },
 
   vite: () =>
