@@ -17,20 +17,17 @@ import {
   profileStorage,
   settingsStorage,
   applicationsStorage,
+  activeApplicationsStorage,
 } from '@/lib/storage'
 
 import type { JobApplication } from '@/types/job'
+import type { FormField } from '@/types/messages'
+import type { UserProfile } from '@/types/profile'
 
 export default defineBackground(() => {
   console.log('[OpenJobKit] Background service worker started', {
     id: browser.runtime.id,
   })
-
-  // Track active application and its frame ID per tab
-  const activeApplications = new Map<
-    number,
-    { applicationId: string; frameId: number }
-  >()
 
   const cleanup = onMessage({
     // ── Content script detected a job form ──────────────────────────────────
@@ -56,7 +53,7 @@ export default defineBackground(() => {
 
       // Store the active application mapping for this tab and frame
       if (sender.tab?.id) {
-        activeApplications.set(sender.tab.id, {
+        await activeApplicationsStorage.set(sender.tab.id, {
           applicationId: application.id,
           frameId: sender.frameId ?? 0,
         })
@@ -144,7 +141,7 @@ export default defineBackground(() => {
       })
       if (!tab?.id) return
 
-      const active = activeApplications.get(tab.id)
+      const active = await activeApplicationsStorage.get(tab.id)
       if (!active) {
         console.warn(
           '[OpenJobKit] No active application detected for tab:',
@@ -169,6 +166,17 @@ export default defineBackground(() => {
       const applications = await applicationsStorage.getAll()
       return { type: 'APPLICATIONS_RESPONSE', payload: { applications } }
     },
+  })
+
+  // Cleanup active mappings when tab is closed or reloaded
+  browser.tabs.onRemoved.addListener((tabId) => {
+    void activeApplicationsStorage.remove(tabId)
+  })
+
+  browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
+    if (changeInfo.status === 'loading') {
+      void activeApplicationsStorage.remove(tabId)
+    }
   })
 
   // Cleanup listeners on extension unload (good practice)

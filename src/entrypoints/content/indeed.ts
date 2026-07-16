@@ -1,9 +1,8 @@
 // Indeed Apply content script — stub (Phase 2)
 // TODO: Implement Indeed apply button detection and form filling
 
-export default defineContentScript({
-  matches: ['*://*.indeed.com/*'],
-  main() {
-    console.log('[OpenJobKit] Indeed content script loaded — coming soon!')
-  },
-})
+import type { ContentScriptContext } from 'wxt/client'
+
+export function initIndeed(_ctx: ContentScriptContext) {
+  console.log('[OpenJobKit] Indeed content script loaded — coming soon!')
+}

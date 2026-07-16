@@ -17,6 +17,7 @@ export const STORAGE_KEYS = {
   PROFILE: 'ojk_profile',
   SETTINGS: 'ojk_settings',
   APPLICATIONS: 'ojk_applications',
+  ACTIVE_APPLICATIONS: 'ojk_active_applications',
 } as const
 
 export type StorageKey = (typeof STORAGE_KEYS)[keyof typeof STORAGE_KEYS]
@@ -117,4 +118,40 @@ export const applicationsStorage = {
   },
 
   clear: () => storageRemove(STORAGE_KEYS.APPLICATIONS),
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Active Tab Mappings (persisted state for MV3 Service Worker suspension)
+// ────────────────────────────────────────────────────────────────────────────
+
+export interface ActiveAppMapping {
+  applicationId: string
+  frameId: number
+}
+
+export const activeApplicationsStorage = {
+  get: async (tabId: number): Promise<ActiveAppMapping | null> => {
+    const map = await storageGet<Record<number, ActiveAppMapping>>(
+      STORAGE_KEYS.ACTIVE_APPLICATIONS,
+    )
+    return map?.[tabId] ?? null
+  },
+  set: async (tabId: number, mapping: ActiveAppMapping): Promise<void> => {
+    const map =
+      (await storageGet<Record<number, ActiveAppMapping>>(
+        STORAGE_KEYS.ACTIVE_APPLICATIONS,
+      )) ?? {}
+    map[tabId] = mapping
+    await storageSet(STORAGE_KEYS.ACTIVE_APPLICATIONS, map)
+  },
+  remove: async (tabId: number): Promise<void> => {
+    const map = await storageGet<Record<number, ActiveAppMapping>>(
+      STORAGE_KEYS.ACTIVE_APPLICATIONS,
+    )
+    if (map) {
+      delete map[tabId]
+      await storageSet(STORAGE_KEYS.ACTIVE_APPLICATIONS, map)
+    }
+  },
+  clear: () => storageRemove(STORAGE_KEYS.ACTIVE_APPLICATIONS),
 }

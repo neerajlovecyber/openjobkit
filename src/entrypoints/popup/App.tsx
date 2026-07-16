@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 
 import { sendToBackground } from '@/lib/messaging'
+import { activeApplicationsStorage, applicationsStorage } from '@/lib/storage'
 
 import type { JobApplication } from '@/types/job'
 
@@ -47,11 +48,42 @@ export default function App() {
         active: true,
         currentWindow: true,
       })
-      const url = tab?.url ?? ''
+      if (!tab?.id) return
+      const url = tab.url ?? ''
 
+      // 1. Check if we already have a detected job form for this tab ID in our storage
+      // (This is critical for iframe embeds on custom domains where the top URL doesn't match greenhouse/lever)
+      const activeMapping = await activeApplicationsStorage.get(tab.id)
+      if (activeMapping) {
+        const app = await applicationsStorage.getById(
+          activeMapping.applicationId,
+        )
+        if (app) {
+          setTabState({
+            status: 'supported',
+            platform: app.job.platform,
+            url: app.job.url,
+          })
+          // Send PING to restore content script registration context
+          try {
+            await browser.tabs.sendMessage(tab.id, { type: 'PING' })
+          } catch {
+            // Ignored
+          }
+          return
+        }
+      }
+
+      // 2. Fallback to top-level URL pattern matching
       const platform = detectPlatform(url)
       if (platform) {
         setTabState({ status: 'supported', platform, url })
+        // Send PING to all frames to force content scripts to re-register
+        try {
+          await browser.tabs.sendMessage(tab.id, { type: 'PING' })
+        } catch {
+          // Ignored - content script may not be loaded yet
+        }
       } else {
         setTabState({ status: 'unsupported', url })
       }

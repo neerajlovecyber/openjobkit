@@ -79,6 +79,11 @@ export interface TriggerFillMessage {
   }
 }
 
+/** Popup / Background → Content script: check status and force re-registration */
+export interface PingMessage {
+  type: 'PING'
+}
+
 /** Any → Any: generic error */
 export interface ErrorMessage {
   type: 'ERROR'
@@ -99,6 +104,7 @@ export type ExtensionMessage =
   | ApplicationsResponseMessage
   | TriggerFillActiveTabMessage
   | TriggerFillMessage
+  | PingMessage
   | ErrorMessage
 
 // ────────────────────────────────────────────────────────────────────────────

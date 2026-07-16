@@ -3,43 +3,49 @@
 //
 // Matches: linkedin.com/jobs/* and linkedin.com/jobs/view/*
 
+import type { ContentScriptContext } from 'wxt/client'
+
 import { sendToBackground, onMessage } from '@/lib/messaging'
 
 import type { FormField } from '@/types/messages'
 
-export default defineContentScript({
-  matches: ['*://*.linkedin.com/jobs/*'],
-  main(ctx) {
-    console.log('[OpenJobKit] LinkedIn content script loaded')
+export function initLinkedin(ctx: ContentScriptContext) {
+  console.log('[OpenJobKit] LinkedIn content script loaded')
 
-    // Watch for Easy Apply modal to open
-    const observer = new MutationObserver(() => {
+  // Watch for Easy Apply modal to open
+  const observer = new MutationObserver(() => {
+    const modal = document.querySelector('[data-test-modal]')
+    if (modal && !modal.getAttribute('data-ojk-detected')) {
+      modal.setAttribute('data-ojk-detected', 'true')
+      void handleEasyApplyModal(modal as HTMLElement)
+    }
+  })
+
+  observer.observe(document.body, { childList: true, subtree: true })
+
+  // Listen for triggering fill from the popup
+  const cleanup = onMessage({
+    PING: () => {
       const modal = document.querySelector('[data-test-modal]')
-      if (modal && !modal.getAttribute('data-ojk-detected')) {
-        modal.setAttribute('data-ojk-detected', 'true')
+      if (modal) {
+        modal.removeAttribute('data-ojk-detected')
         void handleEasyApplyModal(modal as HTMLElement)
       }
-    })
+    },
+    TRIGGER_FILL: async (msg) => {
+      const { applicationId } = msg.payload
+      const modal = document.querySelector('[data-test-modal]') as HTMLElement
+      if (modal) {
+        await fillCurrentPage(modal, applicationId)
+      }
+    },
+  })
 
-    observer.observe(document.body, { childList: true, subtree: true })
-
-    // Listen for triggering fill from the popup
-    const cleanup = onMessage({
-      TRIGGER_FILL: async (msg) => {
-        const { applicationId } = msg.payload
-        const modal = document.querySelector('[data-test-modal]') as HTMLElement
-        if (modal) {
-          await fillCurrentPage(modal, applicationId)
-        }
-      },
-    })
-
-    ctx.onInvalidated(() => {
-      observer.disconnect()
-      cleanup()
-    })
-  },
-})
+  ctx.onInvalidated(() => {
+    observer.disconnect()
+    cleanup()
+  })
+}
 
 // ────────────────────────────────────────────────────────────────────────────
 

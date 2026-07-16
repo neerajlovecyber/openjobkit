@@ -12,51 +12,54 @@
 // Per inject-run-at-timing skill: document_end — DOM must be parsed so we
 // can query form elements, but we don't need to wait for full page load.
 
+import type { ContentScriptContext } from 'wxt/client'
+
 import { sendToBackground, onMessage } from '@/lib/messaging'
 
 import type { FormField } from '@/types/messages'
 
-export default defineContentScript({
-  matches: [
-    '*://job-boards.greenhouse.io/*',
-    '*://boards.greenhouse.io/*',
-    '*://*.greenhouse.io/*',
-  ],
-  allFrames: true, // inject-all-frames: /embed/job_app loads in an iframe
-  runAt: 'document_end', // inject-run-at-timing: DOM ready, form fields accessible
-  main(ctx) {
-    console.log(
-      '[OpenJobKit] Greenhouse content script loaded',
-      window.location.href,
-    )
+export function initGreenhouse(ctx: ContentScriptContext) {
+  console.log(
+    '[OpenJobKit] Greenhouse content script loaded',
+    window.location.href,
+  )
 
-    // Wait for the form to appear (Greenhouse renders async)
-    void waitForForm(ctx).then((form) => {
-      if (!form) return
-      void handleGreenhouseForm(form)
-    })
+  // Wait for the form to appear (Greenhouse renders async)
+  void waitForForm(ctx).then((form) => {
+    if (!form) return
+    void handleGreenhouseForm(form)
+  })
 
-    // Listen for triggering fill from the popup/background
-    const cleanup = onMessage({
-      TRIGGER_FILL: async (msg) => {
-        const { applicationId } = msg.payload
-        const form = document.querySelector<HTMLFormElement>(
-          '#application_form, form[data-qa="application-form"], form',
-        )
-        if (form) {
-          const btn =
-            (document.getElementById('ojk-fill-btn') as HTMLButtonElement) ||
-            document.createElement('button')
-          await fillForm(form, applicationId, btn)
-        }
-      },
-    })
+  // Listen for triggering fill from the popup/background
+  const cleanup = onMessage({
+    PING: () => {
+      const form = document.querySelector<HTMLFormElement>(
+        '#application_form, form[data-qa="application-form"], form',
+      )
+      if (form) {
+        form.removeAttribute('data-ojk-detected')
+        delete form.dataset.ojkDetected
+        void handleGreenhouseForm(form)
+      }
+    },
+    TRIGGER_FILL: async (msg) => {
+      const { applicationId } = msg.payload
+      const form = document.querySelector<HTMLFormElement>(
+        '#application_form, form[data-qa="application-form"], form',
+      )
+      if (form) {
+        const btn =
+          (document.getElementById('ojk-fill-btn') as HTMLButtonElement) ||
+          document.createElement('button')
+        await fillForm(form, applicationId, btn)
+      }
+    },
+  })
 
-    ctx.onInvalidated(() => {
-      cleanup()
-    })
-  },
-})
+  ctx.onInvalidated(() => {
+    cleanup()
+  })
+}
 
 // ─── Wait for form ────────────────────────────────────────────────────────────
 
@@ -66,7 +69,7 @@ function waitForForm(
   return new Promise((resolve) => {
     // Check immediately first
     const existing = document.querySelector<HTMLFormElement>(
-      '#application_form, form[data-qa="application-form"]',
+      '#application_form, form[data-qa="application-form"], form',
     )
     if (existing) {
       resolve(existing)
@@ -76,7 +79,7 @@ function waitForForm(
     // Watch for it to appear
     const observer = new MutationObserver(() => {
       const form = document.querySelector<HTMLFormElement>(
-        '#application_form, form[data-qa="application-form"]',
+        '#application_form, form[data-qa="application-form"], form',
       )
       if (form) {
         observer.disconnect()
