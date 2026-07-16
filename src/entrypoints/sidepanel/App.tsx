@@ -32,10 +32,10 @@ export default function App() {
   const [filter, setFilter] = useState<JobApplication['status'] | 'all'>('all')
 
   useEffect(() => {
-    loadApplications()
+    void loadApplications()
 
     // Poll for updates every 5 seconds while side panel is open
-    const interval = setInterval(loadApplications, 5000)
+    const interval = setInterval(() => void loadApplications(), 5000)
     return () => clearInterval(interval)
   }, [])
 
