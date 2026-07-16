@@ -1,5 +1,7 @@
 // LinkedIn Easy Apply content script
 // Detects job forms on LinkedIn and orchestrates the AI autofill flow.
+// After the first successful Auto-Fill, re-fills each Easy Apply step when
+// the user advances (does not auto-click Next/Submit).
 //
 // Matches: linkedin.com/jobs/* and linkedin.com/jobs/view/*
 
@@ -9,28 +11,49 @@ import { sendToBackground, onMessage } from '@/lib/messaging'
 
 import type { FormField } from '@/types/messages'
 
+const AUTOFILL_ACTIVE = 'data-ojk-autofill-active'
+const DETECTED = 'data-ojk-detected'
+const STEP_DEBOUNCE_MS = 300
+
+/** Per-modal step-watch cleanup + fill lock */
+const modalSessions = new WeakMap<
+  HTMLElement,
+  {
+    disconnectStepObserver: () => void
+    lastFingerprint: string
+    filling: boolean
+    debounceTimer: ReturnType<typeof setTimeout> | null
+  }
+>()
+
 export function initLinkedin(ctx: ContentScriptContext) {
   console.log('[OpenJobKit] LinkedIn content script loaded')
 
-  // Watch for Easy Apply modal to open
+  // Watch for Easy Apply modal to open / reappear
   const observer = new MutationObserver(() => {
-    const modal = document.querySelector('[data-test-modal]')
-    if (modal && !modal.getAttribute('data-ojk-detected')) {
-      modal.setAttribute('data-ojk-detected', 'true')
-      void handleEasyApplyModal(modal as HTMLElement)
+    const modal = document.querySelector(
+      '[data-test-modal]',
+    ) as HTMLElement | null
+    if (modal && !modal.getAttribute(DETECTED)) {
+      modal.setAttribute(DETECTED, 'true')
+      void handleEasyApplyModal(modal)
+    }
+
+    // Modal closed: clear any orphaned session (WeakMap drops with GC; nothing else needed)
+    if (!modal) {
+      // no-op — sessions are keyed by modal element
     }
   })
 
   observer.observe(document.body, { childList: true, subtree: true })
 
-  // Listen for triggering fill from the popup
   const cleanup = onMessage({
     PING: () => {
       const modal = document.querySelector('[data-test-modal]')
       if (!modal) return
-      if (modal.getAttribute('data-ojk-detected')) {
+      if (modal.getAttribute(DETECTED)) {
         if (!modal.querySelector('#ojk-fill-btn')) {
-          modal.removeAttribute('data-ojk-detected')
+          modal.removeAttribute(DETECTED)
           void handleEasyApplyModal(modal as HTMLElement)
         }
         return
@@ -41,7 +64,7 @@ export function initLinkedin(ctx: ContentScriptContext) {
       const { applicationId } = msg.payload
       const modal = document.querySelector('[data-test-modal]') as HTMLElement
       if (modal) {
-        await fillCurrentPage(modal, applicationId)
+        await fillCurrentPage(modal, applicationId, { activateSession: true })
       }
     },
   })
@@ -70,7 +93,6 @@ async function handleEasyApplyModal(modal: HTMLElement) {
 
   console.log('[OpenJobKit] Easy Apply detected:', job.title)
 
-  // Notify background and get applicationId
   const result = await sendToBackground<{ applicationId: string }>({
     type: 'DETECT_JOB',
     payload: { job, tabId: 0 },
@@ -78,12 +100,11 @@ async function handleEasyApplyModal(modal: HTMLElement) {
 
   if (!result?.applicationId) return
 
-  // Inject fill button into the modal
   injectFillButton(modal, result.applicationId)
+  ensureStepWatcher(modal, result.applicationId)
 }
 
 function scrapeJobDetails() {
-  // Job title
   const titleEl = document.querySelector(
     '.job-details-jobs-unified-top-card__job-title',
   )
@@ -129,10 +150,9 @@ function injectFillButton(modal: HTMLElement, applicationId: string) {
     font-family: inherit;
   `
 
-  btn.addEventListener(
-    'click',
-    () => void fillCurrentPage(modal, applicationId),
-  )
+  btn.addEventListener('click', () => {
+    void fillCurrentPage(modal, applicationId, { activateSession: true })
+  })
 
   const header = modal.querySelector('.artdeco-modal__header')
   if (header) {
@@ -141,14 +161,90 @@ function injectFillButton(modal: HTMLElement, applicationId: string) {
   }
 }
 
-async function fillCurrentPage(modal: HTMLElement, applicationId: string) {
+/** Watch modal body for Easy Apply step changes; auto-refill when session is active. */
+function ensureStepWatcher(modal: HTMLElement, applicationId: string) {
+  const existing = modalSessions.get(modal)
+  if (existing) return
+
+  const session = {
+    disconnectStepObserver: () => {},
+    lastFingerprint: fieldFingerprint(modal),
+    filling: false,
+    debounceTimer: null as ReturnType<typeof setTimeout> | null,
+  }
+
+  const stepObserver = new MutationObserver(() => {
+    // Modal removed from DOM — stop watching
+    if (!document.body.contains(modal)) {
+      if (session.debounceTimer) clearTimeout(session.debounceTimer)
+      stepObserver.disconnect()
+      modalSessions.delete(modal)
+      return
+    }
+
+    if (session.debounceTimer) clearTimeout(session.debounceTimer)
+    session.debounceTimer = setTimeout(() => {
+      void onStepMaybeChanged(modal, applicationId)
+    }, STEP_DEBOUNCE_MS)
+  })
+
+  const body =
+    modal.querySelector('.artdeco-modal__content, .jobs-easy-apply-content') ??
+    modal
+  stepObserver.observe(body, {
+    childList: true,
+    subtree: true,
+    characterData: true,
+  })
+
+  session.disconnectStepObserver = () => stepObserver.disconnect()
+  modalSessions.set(modal, session)
+}
+
+async function onStepMaybeChanged(modal: HTMLElement, applicationId: string) {
+  const session = modalSessions.get(modal)
+  if (!session) return
+  if (modal.getAttribute(AUTOFILL_ACTIVE) !== 'true') return
+  if (session.filling) return
+
+  const nextFp = fieldFingerprint(modal)
+  if (nextFp === session.lastFingerprint) return
+  if (nextFp === '') {
+    // Review / empty step — update fingerprint so we don't thrash
+    session.lastFingerprint = nextFp
+    return
+  }
+
+  console.log('[OpenJobKit] Easy Apply step changed — auto-refilling')
+  await fillCurrentPage(modal, applicationId, { activateSession: false })
+}
+
+function fieldFingerprint(modal: HTMLElement): string {
+  return detectFormFields(modal)
+    .map((f) => `${f.label}|${f.type}|${f.selector}`)
+    .join(';;')
+}
+
+async function fillCurrentPage(
+  modal: HTMLElement,
+  applicationId: string,
+  opts: { activateSession: boolean },
+) {
+  const session = modalSessions.get(modal)
+  if (session?.filling) return
+
   const fields = detectFormFields(modal)
   if (fields.length === 0) {
     console.log('[OpenJobKit] No fillable fields found on this page')
     return
   }
 
-  const btn = modal.querySelector('#ojk-fill-btn') as HTMLButtonElement
+  if (session) {
+    session.filling = true
+    session.lastFingerprint = fieldFingerprint(modal)
+  }
+
+  const btn = modal.querySelector('#ojk-fill-btn') as HTMLButtonElement | null
   if (btn) {
     btn.textContent = '⏳ Filling...'
     btn.disabled = true
@@ -164,28 +260,45 @@ async function fillCurrentPage(modal: HTMLElement, applicationId: string) {
     })
 
     if (result?.answers) {
-      applyAnswers(fields, result.answers)
-      if (btn) btn.textContent = '✅ Filled!'
+      applyAnswers(modal, fields, result.answers, result.coverLetter)
+      if (opts.activateSession) {
+        modal.setAttribute(AUTOFILL_ACTIVE, 'true')
+      }
+      // Fingerprint after fill (values changed but labels/selectors same)
+      if (session) {
+        session.lastFingerprint = fieldFingerprint(modal)
+      }
+      if (btn) {
+        btn.textContent = '✅ Filled!'
+        btn.disabled = false
+      }
+    } else if (btn) {
+      btn.textContent = '✨ Auto-Fill with AI'
+      btn.disabled = false
     }
   } catch (err) {
     console.error('[OpenJobKit] Fill error:', err)
     if (btn) {
-      btn.textContent = '❌ Error'
+      btn.textContent = '❌ Error — retry'
       btn.disabled = false
     }
+  } finally {
+    if (session) session.filling = false
   }
 }
 
 function detectFormFields(container: HTMLElement): Array<FormField> {
   const fields: Array<FormField> = []
 
-  // Text inputs and textareas
   container
     .querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(
       'input[type="text"], input[type="email"], input[type="tel"], input[type="url"], input[type="number"], textarea',
     )
     .forEach((el) => {
-      const label = findLabel(el)
+      // Skip disabled / non-visible controls (avoid offsetParent — fixed modals break it)
+      if (el.disabled || !isVisibleField(el)) return
+
+      const label = findLabel(el, container)
       if (!label) return
 
       fields.push({
@@ -198,9 +311,10 @@ function detectFormFields(container: HTMLElement): Array<FormField> {
       })
     })
 
-  // Select dropdowns
   container.querySelectorAll<HTMLSelectElement>('select').forEach((el) => {
-    const label = findLabel(el)
+    if (el.disabled || !isVisibleField(el)) return
+
+    const label = findLabel(el, container)
     if (!label) return
 
     fields.push({
@@ -216,18 +330,23 @@ function detectFormFields(container: HTMLElement): Array<FormField> {
   return fields
 }
 
-function findLabel(el: HTMLElement): string | null {
-  // Try aria-label
+function isVisibleField(el: HTMLElement): boolean {
+  if (typeof el.checkVisibility === 'function') {
+    return el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })
+  }
+  const style = getComputedStyle(el)
+  return style.display !== 'none' && style.visibility !== 'hidden'
+}
+
+function findLabel(el: HTMLElement, container: HTMLElement): string | null {
   if (el.getAttribute('aria-label')) return el.getAttribute('aria-label')
 
-  // Try associated <label>
   const id = el.id
   if (id) {
-    const label = document.querySelector(`label[for="${id}"]`)
+    const label = container.querySelector(`label[for="${CSS.escape(id)}"]`)
     if (label) return label.textContent?.trim() ?? null
   }
 
-  // Try closest label or legend
   const parent = el.closest(
     'fieldset, .artdeco-text-input--container, [class*="form-field"]',
   )
@@ -240,21 +359,48 @@ function findLabel(el: HTMLElement): string | null {
 }
 
 function getSelector(el: HTMLElement): string {
-  if (el.id) return `#${el.id}`
+  if (el.id) return `#${CSS.escape(el.id)}`
   const inputEl = el as HTMLInputElement
-  if (inputEl.name) return `[name="${inputEl.name}"]`
+  if (inputEl.name) return `[name="${CSS.escape(inputEl.name)}"]`
   return el.tagName.toLowerCase()
 }
 
+function isCoverLetterLabel(label: string): boolean {
+  const lower = label.toLowerCase()
+  return lower.includes('cover letter') || lower.includes('cover-letter')
+}
+
+function setNativeValue(
+  el: HTMLInputElement | HTMLTextAreaElement,
+  value: string,
+) {
+  const proto =
+    el.tagName === 'TEXTAREA'
+      ? HTMLTextAreaElement.prototype
+      : HTMLInputElement.prototype
+  const descriptor = Object.getOwnPropertyDescriptor(proto, 'value')
+  descriptor?.set?.call(el, value)
+  el.dispatchEvent(new Event('input', { bubbles: true }))
+  el.dispatchEvent(new Event('change', { bubbles: true }))
+}
+
 function applyAnswers(
+  modal: HTMLElement,
   fields: Array<FormField>,
   answers: Record<string, string>,
+  coverLetter?: string,
 ) {
   fields.forEach((field) => {
-    const value = answers[field.id]
+    let value = answers[field.id]
+
+    // Prefer generated cover letter for matching fields when available
+    if (coverLetter && isCoverLetterLabel(field.label)) {
+      value = coverLetter
+    }
+
     if (value === undefined) return
 
-    const el = document.querySelector<
+    const el = modal.querySelector<
       HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement
     >(field.selector)
     if (!el) return
@@ -263,18 +409,25 @@ function applyAnswers(
       const option = Array.from(el.options).find(
         (o) => o.text === value || o.value === value,
       )
-      if (option) el.value = option.value
+      if (option) {
+        el.value = option.value
+        el.dispatchEvent(new Event('change', { bubbles: true }))
+      }
     } else {
-      // Use native input value setter so React/Vue state updates properly
-      // Extracted to avoid unbound-method lint error
-      const proto =
-        el.tagName === 'TEXTAREA'
-          ? HTMLTextAreaElement.prototype
-          : HTMLInputElement.prototype
-      const descriptor = Object.getOwnPropertyDescriptor(proto, 'value')
-      descriptor?.set?.call(el, value)
-      el.dispatchEvent(new Event('input', { bubbles: true }))
-      el.dispatchEvent(new Event('change', { bubbles: true }))
+      setNativeValue(el, value)
     }
   })
+
+  // If cover letter was returned but no field matched via answers ids, still try labels
+  if (coverLetter) {
+    fields.forEach((field) => {
+      if (!isCoverLetterLabel(field.label)) return
+      const el = modal.querySelector<HTMLInputElement | HTMLTextAreaElement>(
+        field.selector,
+      )
+      if (!el || el instanceof HTMLSelectElement) return
+      if (el.value?.trim()) return
+      setNativeValue(el, coverLetter)
+    })
+  }
 }
