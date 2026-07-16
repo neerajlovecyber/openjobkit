@@ -3,6 +3,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { id as instantId } from '@instantdb/react'
 
 import SignIn from '@/components/SignIn'
+import { Combobox } from '@/components/ui/combobox'
 import { db } from '@/lib/db'
 import { DEMO_PROFILE } from '@/lib/demo-profile'
 import { extractTextFromPdf } from '@/lib/pdf'
@@ -10,6 +11,33 @@ import { DEFAULT_SETTINGS } from '@/types/settings'
 
 import type { UserProfile } from '@/types/profile'
 import type { UserSettings } from '@/types/settings'
+
+const POPULAR_MODELS: Record<
+  string,
+  Array<{ value: string; label: string }>
+> = {
+  openai: [
+    { value: 'gpt-4o-mini', label: 'GPT-4o Mini (Recommended)' },
+    { value: 'gpt-4o', label: 'GPT-4o (High Accuracy)' },
+    { value: 'gpt-3.5-turbo', label: 'GPT-3.5 Turbo' },
+  ],
+  gemini: [
+    { value: 'gemini-1.5-flash', label: 'Gemini 1.5 Flash (Recommended)' },
+    { value: 'gemini-1.5-pro', label: 'Gemini 1.5 Pro' },
+  ],
+  openrouter: [
+    {
+      value: 'google/gemini-2.5-flash',
+      label: 'Gemini 2.5 Flash via OpenRouter (Recommended)',
+    },
+    {
+      value: 'meta-llama/llama-3-8b-instruct:free',
+      label: 'Llama 3 8B Instruct (Free)',
+    },
+    { value: 'deepseek/deepseek-chat', label: 'DeepSeek Chat' },
+    { value: 'anthropic/claude-3-haiku', label: 'Claude 3 Haiku' },
+  ],
+}
 
 export default function App() {
   const { isLoading: isAuthLoading, user, error: authError } = db.useAuth()
@@ -37,6 +65,31 @@ export default function App() {
   const [profile, setProfile] = useState<UserProfile | null>(null)
   const [settings, setSettings] = useState<UserSettings | null>(null)
   const initialized = useRef(false)
+
+  // Dropdown states for models presets
+  const [selectedModelOption, setSelectedModelOption] = useState('custom')
+  const [customModel, setCustomModel] = useState('')
+  const [search, setSearch] = useState('')
+
+  // Dynamic models list fetched from API
+  const [fetchedModels, setFetchedModels] = useState<
+    Array<{ value: string; label: string }>
+  >([])
+  const [fetchingModels, setFetchingModels] = useState(false)
+
+  const filteredItems = React.useMemo(() => {
+    const list = [
+      ...fetchedModels,
+      { value: 'custom', label: 'Custom Model...' },
+    ]
+    if (!search) return list
+    const searchLower = search.toLowerCase()
+    return list.filter(
+      (item) =>
+        item.label.toLowerCase().includes(searchLower) ||
+        item.value.toLowerCase().includes(searchLower),
+    )
+  }, [fetchedModels, search])
 
   // Track if we should show the manual text editor for resumeText
   const [showTextEditor, setShowTextEditor] = useState(false)
@@ -75,6 +128,85 @@ export default function App() {
       )
     }
   }, [isDataLoading, cloudProfile, cloudSettings, user])
+
+  // Fetch live models list dynamically from API keys
+  useEffect(() => {
+    if (!settings) return
+
+    const provider = settings.ai.provider
+    const apiKey = settings.ai.apiKey
+    const controller = new AbortController()
+
+    const fetchLiveModels = async () => {
+      setFetchingModels(true)
+      try {
+        if (provider === 'openrouter') {
+          const resp = await fetch('https://openrouter.ai/api/v1/models', {
+            signal: controller.signal,
+          })
+          const json = await resp.json()
+          const list = json.data.map((m: any) => ({
+            value: m.id,
+            label: m.name || m.id,
+          }))
+          setFetchedModels(list)
+        } else if (provider === 'openai' && apiKey) {
+          const resp = await fetch('https://api.openai.com/v1/models', {
+            headers: { Authorization: `Bearer ${apiKey}` },
+            signal: controller.signal,
+          })
+          const json = await resp.json()
+          const list = json.data
+            .filter((m: any) => m.id.startsWith('gpt-') || m.id.startsWith('o'))
+            .map((m: any) => ({ value: m.id, label: m.id }))
+          setFetchedModels(list)
+        } else if (provider === 'gemini' && apiKey) {
+          const resp = await fetch(
+            `https://generativelanguage.googleapis.com/v1/models?key=${apiKey}`,
+            { signal: controller.signal },
+          )
+          const json = await resp.json()
+          const list = json.models
+            .filter((m: any) => m.name.startsWith('models/gemini'))
+            .map((m: any) => {
+              const shortId = m.name.replace('models/', '')
+              return { value: shortId, label: m.displayName || shortId }
+            })
+          setFetchedModels(list)
+        } else {
+          setFetchedModels(POPULAR_MODELS[provider] || [])
+        }
+      } catch (err) {
+        if ((err as Error).name !== 'AbortError') {
+          console.error('[OpenJobKit] Failed to fetch live models:', err)
+          setFetchedModels(POPULAR_MODELS[provider] || [])
+        }
+      } finally {
+        setFetchingModels(false)
+      }
+    }
+
+    void fetchLiveModels()
+
+    return () => {
+      controller.abort()
+    }
+  }, [settings?.ai.provider, settings?.ai.apiKey])
+
+  // Synchronize local dropdown state with settings and fetched models
+  useEffect(() => {
+    if (settings) {
+      const matchedPreset = fetchedModels.find(
+        (p) => p.value === settings.ai.model,
+      )
+      if (matchedPreset) {
+        setSelectedModelOption(settings.ai.model)
+      } else if (settings.ai.model) {
+        setSelectedModelOption('custom')
+        setCustomModel(settings.ai.model)
+      }
+    }
+  }, [settings?.ai.provider, settings?.ai.model, fetchedModels])
 
   function showStatus(
     text: string,
@@ -577,7 +709,8 @@ export default function App() {
                     }
                     className="w-full rounded-xl border border-white/10 bg-[#16161c] px-3 py-2 text-sm text-white focus:border-violet-500 focus:outline-none"
                   >
-                    <option value="openai">OpenAI / OpenRouter</option>
+                    <option value="openai">OpenAI</option>
+                    <option value="openrouter">OpenRouter</option>
                     <option value="gemini">Google Gemini</option>
                   </select>
                 </div>
@@ -588,47 +721,82 @@ export default function App() {
                   </label>
                   <input
                     type="password"
-                    placeholder="sk-..."
+                    placeholder={
+                      settings.ai.provider === 'openrouter'
+                        ? 'sk-or-...'
+                        : settings.ai.provider === 'gemini'
+                          ? 'AIzaSy...'
+                          : 'sk-...'
+                    }
                     value={settings.ai.apiKey}
                     onChange={(e) => handleAIChange('apiKey', e.target.value)}
                     className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white placeholder:text-white/20 focus:border-violet-500 focus:outline-none"
                   />
                 </div>
 
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                  <div className="flex flex-col gap-1.5">
-                    <label className="text-xs font-semibold text-white/60">
-                      Model Name
-                    </label>
-                    <input
-                      type="text"
-                      value={settings.ai.model}
-                      onChange={(e) => handleAIChange('model', e.target.value)}
-                      required
-                      placeholder="e.g. gpt-4o-mini"
-                      className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white placeholder:text-white/20 focus:border-violet-500 focus:outline-none"
-                    />
-                  </div>
-                  <div className="flex flex-col gap-1.5">
-                    <label className="text-xs font-semibold text-white/60">
-                      Temperature (Creativity)
-                    </label>
-                    <input
-                      type="number"
-                      step="0.1"
-                      min="0"
-                      max="1"
-                      value={settings.ai.temperature}
-                      onChange={(e) =>
-                        handleAIChange(
-                          'temperature',
-                          parseFloat(e.target.value),
-                        )
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-xs font-semibold text-white/60">
+                    Model Preset
+                  </label>
+                  <Combobox
+                    value={selectedModelOption}
+                    onValueChange={(val) => {
+                      if (!val) return
+                      setSelectedModelOption(val)
+                      if (val !== 'custom') {
+                        handleAIChange('model', val)
+                      } else {
+                        handleAIChange('model', customModel)
                       }
-                      required
-                      className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white placeholder:text-white/20 focus:border-violet-500 focus:outline-none"
+                    }}
+                    onInputValueChange={(val) => {
+                      setSearch(val)
+                    }}
+                  >
+                    <ComboboxInput
+                      placeholder={
+                        fetchingModels
+                          ? 'Loading live models...'
+                          : 'Select or search a model...'
+                      }
                     />
-                  </div>
+                    <ComboboxContent>
+                      <ComboboxEmpty>No matching models found.</ComboboxEmpty>
+                      <ComboboxList>
+                        {filteredItems.map((item) => (
+                          <ComboboxItem key={item.value} value={item.value}>
+                            {item.label}
+                          </ComboboxItem>
+                        ))}
+                      </ComboboxList>
+                    </ComboboxContent>
+                  </Combobox>
+
+                  {selectedModelOption === 'custom' && (
+                    <div className="mt-2 flex flex-col gap-1.5">
+                      <label className="text-[11px] font-semibold tracking-wider text-white/40 uppercase">
+                        Custom Model Name
+                      </label>
+                      <input
+                        type="text"
+                        value={customModel}
+                        onChange={(e) => {
+                          const val = e.target.value
+                          setCustomModel(val)
+                          handleAIChange('model', val)
+                        }}
+                        required
+                        placeholder={
+                          settings.ai.provider === 'openrouter'
+                            ? 'e.g. google/gemini-2.5-flash'
+                            : settings.ai.provider === 'gemini'
+                              ? 'e.g. gemini-1.5-flash'
+                              : 'e.g. gpt-4o-mini'
+                        }
+                        className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white placeholder:text-white/20 focus:border-violet-500 focus:outline-none"
+                      />
+                    </div>
+                  )}
                 </div>
 
                 <div className="border-t border-white/8 pt-6">

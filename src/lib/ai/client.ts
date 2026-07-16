@@ -1,5 +1,6 @@
 import { createGoogleGenerativeAI } from '@ai-sdk/google'
 import { createOpenAI } from '@ai-sdk/openai'
+import { createOpenRouter } from '@openrouter/ai-sdk-provider'
 import { generateObject, generateText } from 'ai'
 import { z } from 'zod'
 
@@ -22,21 +23,29 @@ function getModel(settings: AISettings) {
   const temp = settings.temperature ?? 0.3
   const maxTokens = settings.maxTokens ?? 2000
 
-  // 1. OpenAI / OpenRouter
+  // 1. OpenRouter
+  if (settings.provider === 'openrouter') {
+    const openrouter = createOpenRouter({
+      apiKey: settings.apiKey,
+    })
+    return openrouter(modelName)
+  }
+
+  // 2. OpenAI
   if (settings.provider === 'openai') {
-    // If the key starts with 'sk-or-' or the model name has a slash, use OpenRouter
+    // If the key starts with 'sk-or-' or the model name has a slash, use OpenRouter as fallback
     const isOpenRouter =
       settings.apiKey.startsWith('sk-or-') || modelName.includes('/')
 
+    if (isOpenRouter) {
+      const openrouter = createOpenRouter({
+        apiKey: settings.apiKey,
+      })
+      return openrouter(modelName)
+    }
+
     const openai = createOpenAI({
       apiKey: settings.apiKey,
-      baseURL: isOpenRouter ? 'https://openrouter.ai/api/v1' : undefined,
-      headers: isOpenRouter
-        ? {
-            'HTTP-Referer': 'https://github.com/nsp/openjobkit',
-            'X-Title': 'OpenJobKit',
-          }
-        : undefined,
     })
 
     return openai(modelName)

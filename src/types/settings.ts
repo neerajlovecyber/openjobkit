@@ -1,6 +1,6 @@
 // User settings and preferences
 
-export type AIProvider = 'openai' | 'gemini' | 'anthropic' | 'ollama'
+export type AIProvider = 'openai' | 'openrouter' | 'gemini'
 
 export type ApplyMode =
   | 'review' // AI fills, user reviews every field, then manually submits
@@ -13,7 +13,6 @@ export interface AISettings {
   model: string // e.g. "gpt-4o", "gemini-1.5-pro"
   temperature: number // 0–1, default 0.3
   maxTokens: number
-  ollamaBaseUrl?: string // Only for ollama provider
 }
 
 export interface PlatformSettings {
