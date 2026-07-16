@@ -219,7 +219,7 @@ export default defineBackground(() => {
           })
         }
 
-        return { answers, coverLetter }
+        return { answers, coverLetter, applyMode: settings.applyMode ?? 'auto' }
       } catch (error) {
         if (settings.trackApplications) {
           const existing = await applicationsStorage.getById(trackId)
@@ -242,15 +242,49 @@ export default defineBackground(() => {
     },
 
     // ── User submitted the application ──────────────────────────────────────
-    SUBMIT_JOB: async (msg) => {
+    SUBMIT_JOB: async (msg, sender) => {
       const { applicationId } = msg.payload
-      const existing = await applicationsStorage.getById(applicationId)
-      if (!existing) return
-      await applicationsStorage.update(applicationId, {
-        status: 'applied',
-        appliedAt: new Date().toISOString(),
-      })
-      console.log('[OpenJobKit] Application submitted:', applicationId)
+      const active =
+        sender.tab?.id != null
+          ? await activeApplicationsStorage.get(sender.tab.id)
+          : null
+      const resolvedId = active?.applicationId ?? applicationId
+
+      let existing = await applicationsStorage.getById(resolvedId)
+      if (!existing && resolvedId !== applicationId) {
+        existing = await applicationsStorage.getById(applicationId)
+      }
+
+      const appliedAt = new Date().toISOString()
+
+      if (existing) {
+        await applicationsStorage.update(existing.id, {
+          status: 'applied',
+          appliedAt,
+          error: undefined,
+        })
+        console.log('[OpenJobKit] Application marked applied:', existing.id)
+        return { ok: true, applicationId: existing.id }
+      }
+
+      // Ephemeral fill (tracking off or ID drift) — create applied record from session
+      const job = active?.job
+      if (job) {
+        await applicationsStorage.add({
+          id: resolvedId,
+          job,
+          status: 'applied',
+          appliedAt,
+        })
+        console.log('[OpenJobKit] Application created as applied:', resolvedId)
+        return { ok: true, applicationId: resolvedId }
+      }
+
+      console.warn(
+        '[OpenJobKit] SUBMIT_JOB: no application found for',
+        applicationId,
+      )
+      return { ok: false }
     },
 
     // ── Open autofill settings as a page overlay modal (Jobright-style) ─────

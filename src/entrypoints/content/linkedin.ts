@@ -1,7 +1,7 @@
 // LinkedIn Easy Apply content script
 // Detects job forms on LinkedIn and orchestrates the AI autofill flow.
-// After Auto-Fill: fills the current step, clicks Next/Review (never Submit),
-// and re-fills each following step until the final Submit screen.
+// After Auto-Fill: fills each step, clicks Next/Review, then Submit application
+// (unless Settings → applyMode is "review").
 //
 // Matches: linkedin.com/jobs/* and linkedin.com/jobs/view/*
 
@@ -664,6 +664,7 @@ function findAdvanceButton(
     return (
       t === 'submit application' ||
       t === 'submit' ||
+      t.startsWith('submit applic') ||
       (t.includes('submit') && t.includes('application'))
     )
   })
@@ -709,7 +710,7 @@ async function waitForStepChange(
   return fieldFingerprint(modal) !== previousFp
 }
 
-/** Fill every Easy Apply step; click Next/Review; stop before Submit. */
+/** Fill every Easy Apply step; click Next/Review; Submit on the final page. */
 async function runAutofillThroughSteps(
   modal: HTMLElement,
   applicationId: string,
@@ -727,20 +728,33 @@ async function runAutofillThroughSteps(
   try {
     for (let step = 0; step < MAX_AUTO_STEPS; step++) {
       await waitForApplyFormReady(modal)
-      await fillCurrentPage(modal, applicationId, {
-        activateSession: true,
-        advance: false,
-      })
+
+      const advanceBefore = findAdvanceButton(modal)
+      const onSubmitScreen = advanceBefore?.kind === 'submit'
+
+      try {
+        await fillCurrentPage(modal, applicationId, {
+          activateSession: true,
+          advance: false,
+          allowEmpty: onSubmitScreen,
+        })
+      } catch (err) {
+        // Review screen may have no text fields — still allow Submit
+        if (!onSubmitScreen) throw err
+        console.warn('[OpenJobKit] Fill skipped on submit screen:', err)
+      }
 
       const advance = findAdvanceButton(modal)
-      if (!advance || advance.kind === 'submit') {
+      if (!advance) {
         if (btn) {
-          btn.textContent = '✅ Filled! Review & submit.'
+          btn.textContent = '✅ Done'
           btn.disabled = false
         }
-        console.log(
-          '[OpenJobKit] Stopped before Submit — review the application',
-        )
+        return
+      }
+
+      if (advance.kind === 'submit') {
+        await submitEasyApply(modal, btn, applicationId)
         return
       }
 
@@ -762,7 +776,12 @@ async function runAutofillThroughSteps(
 
       const changed = await waitForStepChange(modal, beforeFp)
       if (!changed) {
-        // Still on same step — maybe validation; leave for user
+        // Maybe we are already on submit (fingerprint same) — try submit
+        const again = findAdvanceButton(modal)
+        if (again?.kind === 'submit') {
+          await submitEasyApply(modal, btn, applicationId)
+          return
+        }
         if (btn) {
           btn.textContent = '✅ Filled — check required fields, then Next'
           btn.disabled = false
@@ -770,22 +789,14 @@ async function runAutofillThroughSteps(
         return
       }
 
-      // After Review, usually lands on Submit — fill any leftover fields then stop
-      if (advance.kind === 'review') {
-        await waitForApplyFormReady(modal)
-        const stillFields = detectFormFields(resolveApplyFormRoot(modal))
-        if (stillFields.length > 0) {
-          await fillCurrentPage(modal, applicationId, {
-            activateSession: true,
-            advance: false,
-          })
-        }
-        if (btn) {
-          btn.textContent = '✅ Filled! Review & submit.'
-          btn.disabled = false
-        }
-        return
-      }
+      // After Review, continue loop → fill follow checkbox → Submit
+    }
+
+    // Max steps — try submit if available
+    const last = findAdvanceButton(modal)
+    if (last?.kind === 'submit') {
+      await submitEasyApply(modal, btn, applicationId)
+      return
     }
 
     if (btn) {
@@ -803,11 +814,114 @@ async function runAutofillThroughSteps(
   }
 }
 
+function uncheckFollowCompany(modal: HTMLElement) {
+  const root = resolveApplyFormRoot(modal)
+  const follow =
+    root.querySelector<HTMLInputElement>('#follow-company-checkbox') ??
+    root.querySelector<HTMLInputElement>(
+      'input[type="checkbox"][id*="follow" i]',
+    ) ??
+    Array.from(
+      root.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'),
+    ).find((el) => {
+      const label = labelTextForControl(el, root)?.toLowerCase() ?? ''
+      return label.includes('follow') && el.checked
+    })
+
+  if (follow?.checked) {
+    clickRadioOrCheckbox(follow, root, false)
+  }
+}
+
+async function submitEasyApply(
+  modal: HTMLElement,
+  btn: HTMLButtonElement | null,
+  applicationId: string,
+) {
+  uncheckFollowCompany(modal)
+  await sleep(200)
+
+  const advance = findAdvanceButton(modal)
+  if (!advance || advance.kind !== 'submit') {
+    if (btn) {
+      btn.textContent = '✅ Filled! Click Submit application'
+      btn.disabled = false
+    }
+    return
+  }
+
+  if (btn) {
+    btn.textContent = '⏳ Submitting…'
+    btn.disabled = true
+  }
+  console.log('[OpenJobKit] Clicking Submit application')
+  advance.button.click()
+  await sleep(800)
+  dismissContinueApplyingReminder()
+
+  // Wait for dialog close or LinkedIn "Application sent" confirmation
+  let submitted = false
+  const started = Date.now()
+  while (Date.now() - started < 8000) {
+    await sleep(300)
+    if (isApplicationSentConfirmation()) {
+      submitted = true
+      break
+    }
+    if (!document.body.contains(modal) || !findEasyApplyModal()) {
+      submitted = true
+      break
+    }
+    const stillSubmit = findAdvanceButton(modal)
+    if (!stillSubmit || stillSubmit.kind !== 'submit') {
+      submitted = true
+      break
+    }
+  }
+
+  if (submitted) {
+    try {
+      await sendToBackground({
+        type: 'SUBMIT_JOB',
+        payload: { applicationId },
+      })
+    } catch (err) {
+      console.warn('[OpenJobKit] Failed to mark application as applied:', err)
+    }
+    if (btn) {
+      btn.textContent = '✅ Submitted!'
+      btn.disabled = false
+    }
+  } else if (btn) {
+    btn.textContent = '⚠️ Submit may have failed — check LinkedIn'
+    btn.disabled = false
+  }
+}
+
+function isApplicationSentConfirmation(): boolean {
+  const text = (document.body.innerText ?? '').toLowerCase()
+  return (
+    text.includes('application sent') ||
+    text.includes('your application was sent') ||
+    text.includes('application was submitted') ||
+    !!document
+      .querySelector(
+        '[data-test-modal-id="application-sent"], .artdeco-modal__header h2, .jpac-modal-header',
+      )
+      ?.textContent?.toLowerCase()
+      .includes('application')
+  )
+}
+
 async function fillCurrentPage(
   modal: HTMLElement,
   applicationId: string,
-  opts: { activateSession: boolean; advance?: boolean },
-) {
+  opts: {
+    activateSession: boolean
+    advance?: boolean
+    allowEmpty?: boolean
+  },
+): Promise<{ applyMode?: 'review' | 'semi-auto' | 'auto' } | void> {
   const session = modalSessions.get(modal)
   if (session?.filling) return
 
@@ -821,6 +935,7 @@ async function fillCurrentPage(
   }
 
   if (fields.length === 0) {
+    if (opts.allowEmpty) return
     const raw = countRawControls(root)
     throw new Error(
       raw > 0
@@ -847,6 +962,7 @@ async function fillCurrentPage(
     const result = await sendToBackground<{
       answers: Record<string, string>
       coverLetter?: string
+      applyMode?: 'review' | 'semi-auto' | 'auto'
     }>({
       type: 'FILL_JOB',
       payload: { applicationId, fields, job },
@@ -879,6 +995,8 @@ async function fillCurrentPage(
       btn.textContent = '✨ Auto-Fill with AI'
       btn.disabled = false
     }
+
+    return { applyMode: result?.applyMode }
   } catch (err) {
     console.error('[OpenJobKit] Fill error:', err)
     if (btn) {

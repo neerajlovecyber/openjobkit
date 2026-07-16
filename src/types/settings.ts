@@ -69,7 +69,7 @@ export const DEFAULT_PLATFORM_SETTINGS: PlatformSettings = {
 }
 
 export const DEFAULT_SETTINGS: UserSettings = {
-  applyMode: 'review',
+  applyMode: 'auto',
   autoDetect: true,
   showFloatingButton: true,
   ai: DEFAULT_AI_SETTINGS,
