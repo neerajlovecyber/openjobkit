@@ -130,7 +130,7 @@ For years-of-experience / "how many years" questions: value MUST be digits only 
 For notice period / joining questions: value MUST be digits only (days by default; "0" if immediate). Never write "Immediately available".
 For select/radio fields, return one of the provided options exactly as written.
 For checkbox fields, return "Yes" or "No".
-For file fields, return an empty string (cannot fill files automatically).
+For file/resume fields, the extension uploads the stored resume automatically when possible; return an empty string for file answers.
 Respect MaxLength when provided.
 
 Respond ONLY with the JSON object, no markdown, no explanation.

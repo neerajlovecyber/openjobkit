@@ -81,6 +81,51 @@ export const profileStorage = {
     const existing = await profileStorage.get()
     await profileStorage.set({ ...existing, ...partial })
   },
+
+  /** Linked resume PDF/DOC from InstantDB storage (for Easy Apply upload). */
+  getResumeFile: async (): Promise<{
+    name: string
+    mimeType: string
+    base64: string
+  } | null> => {
+    const userId = await getUserId()
+    const { data } = await db.queryOnce({
+      profiles: {
+        $: { where: { userId } },
+        resumeFile: {},
+      },
+    })
+    const file = data.profiles[0]?.resumeFile as
+      | { id: string; path: string; url: string }
+      | undefined
+      | null
+    if (!file?.url) return null
+
+    const res = await fetch(file.url)
+    if (!res.ok) {
+      throw new Error(`Failed to download resume (${res.status})`)
+    }
+    const buffer = await res.arrayBuffer()
+    const bytes = new Uint8Array(buffer)
+    let binary = ''
+    const chunk = 0x8000
+    for (let i = 0; i < bytes.length; i += chunk) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + chunk))
+    }
+    const base64 = btoa(binary)
+    const name = file.path.split('/').pop() || 'resume.pdf'
+    const mimeType =
+      res.headers.get('content-type') ||
+      (name.toLowerCase().endsWith('.pdf')
+        ? 'application/pdf'
+        : name.toLowerCase().endsWith('.doc')
+          ? 'application/msword'
+          : name.toLowerCase().endsWith('.docx')
+            ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+            : 'application/octet-stream')
+
+    return { name, mimeType, base64 }
+  },
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -177,7 +222,18 @@ export const applicationsStorage = {
         $: { where: { userId }, order: { updatedAt: 'desc' } },
       },
     })
-    return data.applications.map(rowToApp)
+    const apps = data.applications.map(rowToApp)
+    // Clean Filled+Applied twins from earlier ID drift
+    const removed = await applicationsStorage.collapseDuplicates(apps)
+    if (removed > 0) {
+      const { data: fresh } = await db.queryOnce({
+        applications: {
+          $: { where: { userId }, order: { updatedAt: 'desc' } },
+        },
+      })
+      return fresh.applications.map(rowToApp)
+    }
+    return apps
   },
 
   getById: async (appId: string): Promise<JobApplication | null> => {
@@ -200,6 +256,107 @@ export const applicationsStorage = {
         return app.status !== 'applied' && app.status !== 'skipped'
       }) ?? null
     )
+  },
+
+  /** Any application for this job URL (open preferred, else most recent). */
+  getByJobUrl: async (url: string): Promise<JobApplication | null> => {
+    const normalized = normalizeJobUrl(url)
+    if (!normalized) return null
+
+    const apps = await applicationsStorage.getAll()
+    const matches = apps.filter(
+      (app) => normalizeJobUrl(app.job.url) === normalized,
+    )
+    if (matches.length === 0) return null
+    return (
+      matches.find(
+        (app) => app.status !== 'applied' && app.status !== 'skipped',
+      ) ?? matches[0]
+    )
+  },
+
+  /** Keep one application for a job URL; delete the rest (fixes Filled + Applied twins). */
+  removeDuplicatesForJobUrl: async (
+    url: string,
+    keepAppId: string,
+  ): Promise<number> => {
+    const normalized = normalizeJobUrl(url)
+    if (!normalized) return 0
+
+    const apps = await applicationsStorage.getAllRaw()
+    let removed = 0
+    for (const app of apps) {
+      if (app.id === keepAppId) continue
+      if (normalizeJobUrl(app.job.url) !== normalized) continue
+      await applicationsStorage.remove(app.id)
+      removed++
+    }
+    return removed
+  },
+
+  /** Prefer Applied over Filled/etc. when the same job URL appears twice. */
+  collapseDuplicates: async (apps?: Array<JobApplication>): Promise<number> => {
+    const list = apps ?? (await applicationsStorage.getAllRaw())
+    const byUrl = new Map<string, Array<JobApplication>>()
+    for (const app of list) {
+      const key = normalizeJobUrl(app.job.url)
+      if (!key) continue
+      const group = byUrl.get(key) ?? []
+      group.push(app)
+      byUrl.set(key, group)
+    }
+
+    const rank = (status: JobApplication['status']): number => {
+      switch (status) {
+        case 'applied':
+          return 0
+        case 'filled':
+          return 1
+        case 'reviewing':
+          return 2
+        case 'filling':
+          return 3
+        case 'failed':
+          return 4
+        case 'detected':
+          return 5
+        case 'saved':
+          return 6
+        case 'skipped':
+          return 7
+        default:
+          return 9
+      }
+    }
+
+    let removed = 0
+    for (const group of byUrl.values()) {
+      if (group.length < 2) continue
+      group.sort((a, b) => {
+        const r = rank(a.status) - rank(b.status)
+        if (r !== 0) return r
+        const at = a.appliedAt ? Date.parse(a.appliedAt) : 0
+        const bt = b.appliedAt ? Date.parse(b.appliedAt) : 0
+        return bt - at
+      })
+      const keep = group[0]
+      for (const extra of group.slice(1)) {
+        await applicationsStorage.remove(extra.id)
+        removed++
+      }
+      void keep
+    }
+    return removed
+  },
+
+  getAllRaw: async (): Promise<Array<JobApplication>> => {
+    const userId = await getUserId()
+    const { data } = await db.queryOnce({
+      applications: {
+        $: { where: { userId }, order: { updatedAt: 'desc' } },
+      },
+    })
+    return data.applications.map(rowToApp)
   },
 
   add: async (application: JobApplication): Promise<void> => {

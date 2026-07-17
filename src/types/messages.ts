@@ -73,6 +73,11 @@ export interface TriggerFillActiveTabMessage {
   type: 'TRIGGER_FILL_ACTIVE_TAB'
 }
 
+/** Content script → Background: fetch stored resume file for upload */
+export interface GetResumeFileMessage {
+  type: 'GET_RESUME_FILE'
+}
+
 /** Background → Content script: execute form fill */
 export interface TriggerFillMessage {
   type: 'TRIGGER_FILL'
@@ -105,6 +110,7 @@ export type ExtensionMessage =
   | OpenAutofillModalMessage
   | CloseAutofillModalMessage
   | TriggerFillActiveTabMessage
+  | GetResumeFileMessage
   | TriggerFillMessage
   | PingMessage
   | ErrorMessage

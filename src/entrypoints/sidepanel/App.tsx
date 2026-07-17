@@ -97,6 +97,14 @@ export default function App() {
     if (user) void loadCurrentTab()
   }, [user])
 
+  // One-shot cleanup: Filled + Applied twins from earlier ID drift
+  useEffect(() => {
+    if (!user) return
+    void applicationsStorage.collapseDuplicates().catch((err) => {
+      console.warn('[OpenJobKit] Duplicate cleanup failed:', err)
+    })
+  }, [user])
+
   async function loadCurrentTab() {
     try {
       const [tab] = await browser.tabs.query({
@@ -453,6 +461,12 @@ function ApplicationRow({ app }: { app: JobApplication }) {
       ? formatTimeAgo(new Date(app.job.detectedAt))
       : null
 
+  const platform =
+    PLATFORM_LABELS[app.job.platform] ??
+    (app.job.platform
+      ? app.job.platform.charAt(0).toUpperCase() + app.job.platform.slice(1)
+      : 'Unknown')
+
   return (
     <div className="rounded-xl border border-white/8 bg-white/[0.03] px-3 py-2.5 transition-colors hover:bg-white/[0.06]">
       <div className="flex items-start justify-between gap-2">
@@ -472,7 +486,9 @@ function ApplicationRow({ app }: { app: JobApplication }) {
       </div>
 
       <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-white/30">
-        <span className="capitalize">{app.job.platform}</span>
+        <span className="inline-flex items-center rounded-md border border-[#0A66C2]/40 bg-[#0A66C2]/15 px-1.5 py-0.5 text-[10px] font-semibold text-[#70B5F9]">
+          {platform}
+        </span>
         {timeAgo && (
           <>
             <span>·</span>

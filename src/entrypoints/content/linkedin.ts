@@ -369,7 +369,25 @@ function countRawControls(container: HTMLElement): number {
 }
 
 async function registerJobIfPossible(): Promise<string | null> {
-  const job = scrapeJobDetails()
+  let job = scrapeJobDetails()
+
+  // Stub when DOM isn't ready yet but we're clearly on a LinkedIn job URL
+  if (!job) {
+    const id =
+      location.pathname.match(/\/jobs\/view\/(\d+)/i)?.[1] ??
+      new URLSearchParams(location.search).get('currentJobId')
+    if (id) {
+      job = {
+        platform: 'linkedin',
+        url: location.href.split('?')[0] || location.href,
+        title: `LinkedIn Job ${id}`,
+        company: 'Unknown company',
+        location: '',
+        description: '',
+      }
+    }
+  }
+
   if (!job) return cachedApplicationId
 
   try {
@@ -400,7 +418,9 @@ async function handleEasyApplyModal(modal: HTMLElement) {
 }
 
 function scrapeJobDetails() {
-  const jobIdMatch = location.pathname.match(/\/jobs\/view\/(\d+)/i)
+  const jobIdMatch =
+    location.pathname.match(/\/jobs\/view\/(\d+)/i) ??
+    location.search.match(/[?&]currentJobId=(\d+)/i)
 
   // ── Company (SDUI: aria-label="Company, SCG.") ────────────────────────────
   let company = ''
@@ -927,16 +947,33 @@ async function fillCurrentPage(
   if (session?.filling) return
 
   let root = resolveApplyFormRoot(modal)
-  let fields = detectFormFields(root)
+  const resumeDone = await ensureResumeAttached(root)
+  dismissResumeUploadToast()
+
+  let fields = detectFormFields(root).filter((f) => !isResumePickerField(f))
 
   // If the shell opened but LazyColumn has not painted yet, wait
-  if (fields.length === 0) {
+  if (fields.length === 0 && !resumeDone && !isResumeOnlyStep(root)) {
     root = await waitForApplyFormReady(modal)
-    fields = detectFormFields(root)
+    await ensureResumeAttached(root)
+    dismissResumeUploadToast()
+    fields = detectFormFields(root).filter((f) => !isResumePickerField(f))
   }
 
-  if (fields.length === 0) {
-    if (opts.allowEmpty) return
+  // Resume-only step: skip AI entirely (upload/select is enough)
+  if (fields.length === 0 || isResumeOnlyStep(root)) {
+    if (
+      opts.allowEmpty ||
+      resumeDone ||
+      hasResumeAttachment(root) ||
+      isResumeUploadSuccessVisible()
+    ) {
+      dismissResumeUploadToast()
+      if (opts.activateSession) {
+        modal.setAttribute(AUTOFILL_ACTIVE, 'true')
+      }
+      return
+    }
     const raw = countRawControls(root)
     throw new Error(
       raw > 0
@@ -1008,6 +1045,52 @@ async function fillCurrentPage(
   } finally {
     if (session) session.filling = false
   }
+}
+
+function isResumePickerField(field: FormField): boolean {
+  const l = field.label.toLowerCase()
+  return (
+    field.type === 'radio' &&
+    (/\.pdf|\.docx?/.test(l) ||
+      /^resume\*?$/.test(l.trim()) ||
+      l.includes('select or upload a resume') ||
+      (l.includes('resume') && l.includes('pdf')))
+  )
+}
+
+function isResumeOnlyStep(container: HTMLElement): boolean {
+  if (
+    findResumeSection(container) &&
+    listLinkedInResumeCards(container).length > 0
+  ) {
+    const textFields = container.querySelectorAll(
+      'input[type="text"], input[type="email"], input[type="tel"], textarea, select',
+    )
+    return textFields.length === 0
+  }
+  return (
+    !!Array.from(container.querySelectorAll('button')).find((b) =>
+      /upload resume/i.test(b.textContent ?? ''),
+    ) &&
+    container.querySelectorAll(
+      'input[type="text"], input[type="email"], input[type="tel"], textarea',
+    ).length === 0
+  )
+}
+
+function isResumeUploadSuccessVisible(): boolean {
+  const text = (document.body.innerText ?? '').toLowerCase()
+  return text.includes('resume uploaded successfully')
+}
+
+function dismissResumeUploadToast() {
+  if (!isResumeUploadSuccessVisible()) return
+  const closeBtn = Array.from(document.querySelectorAll('button')).find((b) => {
+    const label = (b.getAttribute('aria-label') ?? '').toLowerCase()
+    const near = (b.parentElement?.textContent ?? '').toLowerCase()
+    return label === 'close' && near.includes('resume uploaded')
+  })
+  closeBtn?.click()
 }
 
 function detectFormFields(container: HTMLElement): Array<FormField> {
@@ -1088,20 +1171,7 @@ function detectFormFields(container: HTMLElement): Array<FormField> {
     })
   })
 
-  // Detect resume upload step (informational; file path inject is not possible in extensions)
-  const fileInput =
-    container.querySelector<HTMLInputElement>('input[type="file"]')
-  if (fileInput && !seen.has(fileInput)) {
-    const hasAttachment =
-      !!container.querySelector(
-        'button[aria-label*="Remove" i], .ui-attachment, [class*="ui-attachment"]',
-      ) || !!container.querySelector('input[type="radio"][checked]')
-    if (!hasAttachment) {
-      console.log(
-        '[OpenJobKit] Resume upload step detected — select a LinkedIn saved resume or upload manually',
-      )
-    }
-  }
+  // Resume upload is handled in fillCurrentPage (async), not during detect
 
   if (fields.length === 0) {
     const sdui = document.querySelector<HTMLElement>(
@@ -1113,6 +1183,312 @@ function detectFormFields(container: HTMLElement): Array<FormField> {
   }
 
   return fields
+}
+
+async function ensureResumeAttached(container: HTMLElement): Promise<boolean> {
+  const resumeRoot = findResumeSection(container) ?? container
+
+  // Always prefer uploading the OpenJobKit-stored resume (user default)
+  let stored: { name: string; mimeType: string; base64: string } | null = null
+  try {
+    stored = await sendToBackground<{
+      name: string
+      mimeType: string
+      base64: string
+    } | null>({ type: 'GET_RESUME_FILE' })
+  } catch (err) {
+    console.warn('[OpenJobKit] GET_RESUME_FILE failed:', err)
+  }
+
+  if (stored?.base64) {
+    const uploaded = await uploadResumeViaLinkedIn(resumeRoot, stored)
+    if (uploaded) return true
+
+    // Fallback: direct file input if present without clicking Upload
+    const fileInput =
+      resumeRoot.querySelector<HTMLInputElement>('input[type="file"]') ??
+      document.querySelector<HTMLInputElement>('input[type="file"]')
+    if (fileInput) {
+      setFileInputFiles(
+        fileInput,
+        base64ToFile(
+          stored.base64,
+          stored.name.split('/').pop() || 'resume.pdf',
+          stored.mimeType,
+        ),
+      )
+      await sleep(500)
+      if (
+        (fileInput.files?.length ?? 0) > 0 ||
+        hasResumeAttachment(resumeRoot)
+      ) {
+        console.log('[OpenJobKit] Uploaded resume to LinkedIn:', stored.name)
+        return true
+      }
+    }
+  }
+
+  // Fallback only: select a LinkedIn saved resume if upload isn't possible
+  const cards = listLinkedInResumeCards(resumeRoot)
+  if (cards.length > 0) {
+    const pick = pickBestResumeCard(cards, stored?.name)
+    if (pick && !pick.radio.checked) {
+      const clickTarget =
+        pick.radio.labels?.[0] ??
+        pick.card.querySelector('[role="button"]') ??
+        pick.radio
+      ;(clickTarget as HTMLElement).click()
+      if (!pick.radio.checked)
+        clickRadioOrCheckbox(pick.radio, resumeRoot, true)
+      await sleep(350)
+    }
+    if (cards.some((c) => c.radio.checked)) {
+      console.log(
+        '[OpenJobKit] Fallback: selected LinkedIn saved resume:',
+        cards.find((c) => c.radio.checked)?.name,
+      )
+      return true
+    }
+  }
+
+  if (!stored?.base64) {
+    console.log(
+      '[OpenJobKit] No resume in Settings — upload a PDF in OpenJobKit Settings → Resume',
+    )
+  }
+  return false
+}
+
+function findResumeSection(container: HTMLElement): HTMLElement | null {
+  const byRef = container.querySelector<HTMLElement>(
+    '#easyApplyUploadedResumeRef, [componentkey="easyApplyUploadedResumeRef"]',
+  )
+  if (byRef) {
+    return (
+      byRef.closest('fieldset')?.parentElement ??
+      byRef.closest('[class]') ??
+      byRef.parentElement
+    )
+  }
+
+  const uploadBtn = Array.from(container.querySelectorAll('button')).find((b) =>
+    /upload resume/i.test(b.textContent ?? ''),
+  )
+  if (uploadBtn) {
+    return (
+      uploadBtn.closest('fieldset')?.parentElement ??
+      (uploadBtn.parentElement?.parentElement as HTMLElement | null) ??
+      container
+    )
+  }
+
+  const heading = Array.from(
+    container.querySelectorAll('p, label, legend, h2, h3'),
+  ).find((el) => /^resume\*?$/i.test((el.textContent ?? '').trim()))
+  return (heading?.closest('div') as HTMLElement | null) ?? null
+}
+
+type ResumeCard = {
+  radio: HTMLInputElement
+  name: string
+  dateText: string
+  card: HTMLElement
+}
+
+function listLinkedInResumeCards(root: HTMLElement): Array<ResumeCard> {
+  const fieldset =
+    root.querySelector<HTMLElement>('fieldset[role="radiogroup"]') ??
+    root.querySelector('fieldset') ??
+    root
+
+  const radios = Array.from(
+    fieldset.querySelectorAll<HTMLInputElement>('input[type="radio"]'),
+  ).filter((r) => !r.disabled)
+
+  const cards: Array<ResumeCard> = []
+  for (const radio of radios) {
+    const card = findResumeCardElement(radio)
+    if (!card) continue
+    const text = card.textContent ?? ''
+    const nameMatch = text.match(/([\w.\- ]+\.(?:pdf|docx?|PDF|DOCX?))/i)
+    if (!nameMatch) continue
+    const dateMatch = text.match(/\b(\d{1,2}\/\d{1,2}\/\d{4})\b/)
+    cards.push({
+      radio,
+      name: nameMatch[1].trim(),
+      dateText: dateMatch?.[1] ?? '',
+      card,
+    })
+  }
+  return cards
+}
+
+function findResumeCardElement(radio: HTMLInputElement): HTMLElement | null {
+  let el: HTMLElement | null = radio.parentElement
+  while (el && el !== document.body) {
+    const t = el.textContent ?? ''
+    if (
+      el.querySelector('input[type="radio"]') === radio &&
+      /\.pdf|\.docx?/i.test(t) &&
+      t.length < 800
+    ) {
+      return el
+    }
+    // Outer card wrapping filename + radio
+    try {
+      if (
+        radio.id &&
+        el.querySelector(`input[type="radio"]#${CSS.escape(radio.id)}`) &&
+        /\.pdf|\.docx?/i.test(t)
+      ) {
+        return el
+      }
+    } catch {
+      // Unicode LinkedIn ids like «r7i» can break CSS.escape
+    }
+    el = el.parentElement
+  }
+  // Unicode ids break CSS.escape sometimes — walk without id
+  el = radio.parentElement
+  while (el && el !== document.body) {
+    if (/\.pdf|\.docx?/i.test(el.textContent ?? '') && el.contains(radio)) {
+      const siblingName = el.querySelector('span, p')
+      if (siblingName || (el.textContent?.length ?? 0) < 800) return el
+    }
+    el = el.parentElement
+  }
+  return radio.closest('fieldset > div') as HTMLElement | null
+}
+
+function pickBestResumeCard(
+  cards: Array<ResumeCard>,
+  preferredName?: string,
+): ResumeCard | null {
+  if (cards.length === 0) return null
+
+  if (preferredName) {
+    const base = preferredName.split('/').pop()?.toLowerCase() ?? ''
+    const match = cards.find((c) => c.name.toLowerCase() === base)
+    if (match) return match
+    const soft = cards.find(
+      (c) =>
+        c.name.toLowerCase().includes(base.replace(/\.pdf$/i, '')) ||
+        base.includes(c.name.toLowerCase().replace(/\.pdf$/i, '')),
+    )
+    if (soft) return soft
+  }
+
+  // Prefer personal-named resumes over generic resume.pdf
+  const named = cards.find((c) => /neeraj|singh|[a-z]+_[a-z]+/i.test(c.name))
+  if (named) return named
+
+  const checked = cards.find((c) => c.radio.checked)
+  if (checked) return checked
+
+  // Newest date if parseable
+  const dated = [...cards].sort((a, b) => {
+    const da = Date.parse(a.dateText) || 0
+    const db = Date.parse(b.dateText) || 0
+    return db - da
+  })
+  return dated[0] ?? cards[0]
+}
+
+async function uploadResumeViaLinkedIn(
+  root: HTMLElement,
+  stored: { name: string; mimeType: string; base64: string },
+): Promise<boolean> {
+  const uploadBtn = Array.from(root.querySelectorAll('button')).find((b) =>
+    /upload resume/i.test(b.textContent ?? ''),
+  )
+
+  let fileInput = root.querySelector<HTMLInputElement>('input[type="file"]')
+
+  if (!fileInput && uploadBtn) {
+    uploadBtn.click()
+    await sleep(400)
+    fileInput =
+      root.querySelector<HTMLInputElement>('input[type="file"]') ??
+      document.querySelector<HTMLInputElement>('input[type="file"]')
+  }
+
+  // Some LinkedIn builds keep a hidden file input until Upload is pressed;
+  // also try listening shortly after click.
+  if (!fileInput && uploadBtn) {
+    const started = Date.now()
+    while (Date.now() - started < 2000) {
+      await sleep(150)
+      fileInput =
+        root.querySelector<HTMLInputElement>('input[type="file"]') ??
+        document.querySelector<HTMLInputElement>('input[type="file"]')
+      if (fileInput) break
+    }
+  }
+
+  if (!fileInput) {
+    console.warn('[OpenJobKit] Upload resume button found but no file input')
+    return false
+  }
+
+  const file = base64ToFile(
+    stored.base64,
+    stored.name.split('/').pop() || 'resume.pdf',
+    stored.mimeType,
+  )
+  setFileInputFiles(fileInput, file)
+
+  // Wait for LinkedIn success toast instead of a fixed long delay
+  const started = Date.now()
+  while (Date.now() - started < 4000) {
+    await sleep(150)
+    if (isResumeUploadSuccessVisible() || hasResumeAttachment(root)) {
+      console.log('[OpenJobKit] Uploaded resume to LinkedIn:', file.name)
+      dismissResumeUploadToast()
+      return true
+    }
+  }
+
+  console.log('[OpenJobKit] Uploaded resume to LinkedIn:', file.name)
+  dismissResumeUploadToast()
+  return (fileInput.files?.length ?? 0) > 0 || hasResumeAttachment(root)
+}
+
+function hasResumeAttachment(container: HTMLElement): boolean {
+  if (isResumeUploadSuccessVisible()) return true
+  if (
+    container.querySelector(
+      'button[aria-label*="Remove" i], .ui-attachment, [class*="ui-attachment"]',
+    )
+  ) {
+    return true
+  }
+  const fileInput =
+    container.querySelector<HTMLInputElement>('input[type="file"]')
+  if (fileInput && (fileInput.files?.length ?? 0) > 0) return true
+
+  const cards = listLinkedInResumeCards(container)
+  if (cards.some((c) => c.radio.checked)) return true
+
+  // Fallback: any checked radio inside a resume fieldset
+  const fieldset = container.querySelector('fieldset[role="radiogroup"]')
+  if (fieldset?.querySelector('input[type="radio"]:checked')) return true
+
+  return false
+}
+
+function base64ToFile(base64: string, name: string, mimeType: string): File {
+  const binary = atob(base64)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+  return new File([bytes], name, { type: mimeType })
+}
+
+function setFileInputFiles(input: HTMLInputElement, file: File) {
+  const dt = new DataTransfer()
+  dt.items.add(file)
+  input.files = dt.files
+  input.dispatchEvent(new Event('input', { bubbles: true }))
+  input.dispatchEvent(new Event('change', { bubbles: true }))
 }
 
 function preferVisuallyHiddenText(el: Element | null): string | null {

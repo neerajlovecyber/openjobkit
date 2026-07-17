@@ -106,7 +106,23 @@ export default defineBackground(() => {
 
       // Prefer session job even when applicationId drifted (common after re-DETECT)
       const jobFromSession = active?.job ?? null
-      const resolvedId = active?.applicationId ?? applicationId
+      const jobUrl =
+        jobFromSession?.url ?? jobSnapshot?.url ?? application?.job.url ?? ''
+
+      // Reuse open tracker row for this job URL before creating a twin
+      if (!application && jobUrl) {
+        application = await applicationsStorage.getOpenByJobUrl(jobUrl)
+      }
+      if (
+        !application &&
+        active?.applicationId &&
+        active.applicationId !== applicationId
+      ) {
+        application = await applicationsStorage.getById(active.applicationId)
+      }
+
+      const resolvedId =
+        application?.id ?? active?.applicationId ?? applicationId
 
       if (!application) {
         const job =
@@ -145,6 +161,13 @@ export default defineBackground(() => {
         }
       } else if (settings.trackApplications) {
         await applicationsStorage.update(application.id, { status: 'filling' })
+        if (sender.tab?.id != null) {
+          await activeApplicationsStorage.set(sender.tab.id, {
+            applicationId: application.id,
+            frameId: sender.frameId ?? 0,
+            job: application.job,
+          })
+        }
       }
 
       const trackId = application.id
@@ -252,6 +275,16 @@ export default defineBackground(() => {
       }
     },
 
+    // ── Content script needs the stored resume PDF/DOC for Easy Apply upload ─
+    GET_RESUME_FILE: async () => {
+      try {
+        return await profileStorage.getResumeFile()
+      } catch (err) {
+        console.warn('[OpenJobKit] GET_RESUME_FILE failed:', err)
+        return null
+      }
+    },
+
     // ── User submitted the application ──────────────────────────────────────
     SUBMIT_JOB: async (msg, sender) => {
       const { applicationId } = msg.payload
@@ -260,10 +293,15 @@ export default defineBackground(() => {
           ? await activeApplicationsStorage.get(sender.tab.id)
           : null
       const resolvedId = active?.applicationId ?? applicationId
+      const jobUrl = active?.job?.url
 
       let existing = await applicationsStorage.getById(resolvedId)
       if (!existing && resolvedId !== applicationId) {
         existing = await applicationsStorage.getById(applicationId)
+      }
+      // ID drift: reuse the Filled/open row for this job instead of creating Applied twin
+      if (!existing && jobUrl) {
+        existing = await applicationsStorage.getByJobUrl(jobUrl)
       }
 
       const appliedAt = new Date().toISOString()
@@ -274,7 +312,15 @@ export default defineBackground(() => {
           appliedAt,
           error: undefined,
         })
-        console.log('[OpenJobKit] Application marked applied:', existing.id)
+        const removed = await applicationsStorage.removeDuplicatesForJobUrl(
+          existing.job.url,
+          existing.id,
+        )
+        console.log(
+          '[OpenJobKit] Application marked applied:',
+          existing.id,
+          removed ? `(removed ${removed} duplicate)` : '',
+        )
         return { ok: true, applicationId: existing.id }
       }
 
@@ -287,6 +333,7 @@ export default defineBackground(() => {
           status: 'applied',
           appliedAt,
         })
+        await applicationsStorage.removeDuplicatesForJobUrl(job.url, resolvedId)
         console.log('[OpenJobKit] Application created as applied:', resolvedId)
         return { ok: true, applicationId: resolvedId }
       }
@@ -403,17 +450,41 @@ export default defineBackground(() => {
           await new Promise((resolve) => setTimeout(resolve, 400))
           await browser.tabs.sendMessage(tab.id!, { type: 'PING' })
         }
-        await new Promise((resolve) => setTimeout(resolve, 400))
+        await new Promise((resolve) => setTimeout(resolve, 500))
         return activeApplicationsStorage.get(tab.id!)
       }
 
+      // Always ping so content script can DETECT_JOB / refresh mapping
+      active = (await pingOrInject()) ?? active
+
+      // Don't require a pre-existing session — content script opens Easy Apply
       if (!active) {
-        active = await pingOrInject()
+        const stubId = crypto.randomUUID()
+        const platform = /linkedin\.com/i.test(tab.url ?? '')
+          ? ('linkedin' as const)
+          : /greenhouse/i.test(tab.url ?? '')
+            ? ('greenhouse' as const)
+            : ('unknown' as const)
+        await activeApplicationsStorage.set(tab.id, {
+          applicationId: stubId,
+          frameId: 0,
+          job: {
+            id: crypto.randomUUID(),
+            platform,
+            url: (tab.url ?? '').split('?')[0],
+            title: 'Job',
+            company: 'Unknown company',
+            location: '',
+            description: '',
+            detectedAt: new Date().toISOString(),
+          },
+        })
+        active = await activeApplicationsStorage.get(tab.id)
       }
 
       if (!active) {
         throw new Error(
-          'No Easy Apply form on this page. Open a job, click Easy Apply, then Autofill again.',
+          'Could not reach this tab. Refresh the job page and try Autofill again.',
         )
       }
 
@@ -472,14 +543,38 @@ export default defineBackground(() => {
   })
 
   browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
-    if (changeInfo.url) {
-      void activeApplicationsStorage.remove(tabId)
-    }
+    if (!changeInfo.url) return
+    // LinkedIn SPA tweaks query params constantly — only clear when the job path changes
+    void (async () => {
+      const prev = await activeApplicationsStorage.get(tabId)
+      if (!prev?.job?.url) {
+        await activeApplicationsStorage.remove(tabId)
+        return
+      }
+      const sameJob =
+        normalizeJobPath(prev.job.url) === normalizeJobPath(changeInfo.url!)
+      if (!sameJob) {
+        await activeApplicationsStorage.remove(tabId)
+      }
+    })()
   })
 
   // Cleanup listeners on extension unload (good practice)
   browser.runtime.onSuspend?.addListener(cleanup)
 })
+
+function normalizeJobPath(url: string): string {
+  try {
+    const u = new URL(url)
+    const view = u.pathname.match(/\/jobs\/view\/(\d+)/i)?.[1]
+    if (view) return `linkedin:${view}`
+    const current = u.searchParams.get('currentJobId')
+    if (current) return `linkedin:${current}`
+    return `${u.origin}${u.pathname}`.replace(/\/$/, '')
+  } catch {
+    return url.split('?')[0] ?? url
+  }
+}
 
 // ────────────────────────────────────────────────────────────────────────────
 // Local Deterministic Resolver for Core Fields
