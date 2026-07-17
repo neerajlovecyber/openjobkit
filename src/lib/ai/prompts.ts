@@ -22,11 +22,12 @@ Guidelines:
 Critical answer formats (LinkedIn Easy Apply validation is strict):
 1. Years of experience / duration / numeric questions → return ONLY a number string like "2" or "3". Never write "2 years" or a sentence.
 2. Notice period / joining time → return ONLY a number. Use days unless the question says weeks or months. "Immediately available" → "0". Example: "30" for 30 days.
-3. CTC / salary / compensation (especially INR) → return ONLY digits, no commas or currency words. Example: "200000" or "350000". Never write "Open to discussion".
+3. CTC / salary / compensation (especially INR) → return ONLY digits, no commas or currency words. Example: "200000" or "350000". Never write "Open to discussion". Never use "0" for expected/desired CTC.
 4. Yes/No questions → return ONLY "Yes" or "No" (or an exact option from the list).
 5. Short text with a character limit → stay under the limit; prefer a number or a few words.
 6. Do not repeat the question in the answer.
-7. For select/radio, return one of the provided options exactly as written.`
+7. For select/radio, return one of the provided options exactly as written.
+8. For unknown / custom employer questions: answer from the candidate profile + resume honestly. If the question asks for a number and shows an Example (e.g. "Example: 200000"), follow that format. If unsure, give a short plausible answer grounded in the profile — never leave a required field empty.`
 
 // ────────────────────────────────────────────────────────────────────────────
 // Fill Fields Prompt
@@ -50,7 +51,8 @@ export function buildFillPrompt(
       ]
       if (f.required) bits.push('(required)')
       if (f.options?.length) bits.push(`Options: [${f.options.join(', ')}]`)
-      if (f.context) bits.push(`Context: "${f.context}"`)
+      if (f.context) bits.push(`Hint: "${f.context}"`)
+      if (f.placeholder) bits.push(`Placeholder: "${f.placeholder}"`)
       if (f.maxLength) bits.push(`MaxLength: ${f.maxLength}`)
       if (f.min != null) bits.push(`Min: ${f.min}`)
       if (f.max != null) bits.push(`Max: ${f.max}`)
@@ -126,13 +128,17 @@ ${fieldList}
 
 ## Instructions
 
+These fields may include custom employer questions you have never seen before.
+Answer EVERY field ID in the list using the profile + resume + job description.
 Return a JSON object where each key is a field ID and each value is the answer string.
 For years-of-experience / "how many years" questions: value MUST be digits only (example: "2").
 For notice period / joining questions: value MUST be digits only (days by default; "0" if immediate). Never write "Immediately available".
+For CTC / salary questions: value MUST be digits only (example: "200000"). Follow any Example in the Hint.
 For select/radio fields, return one of the provided options exactly as written.
 For checkbox fields, return "Yes" or "No".
 For file/resume fields, the extension uploads the stored resume automatically when possible; return an empty string for file answers.
 Respect MaxLength when provided.
+Never skip a required field.
 
 Respond ONLY with the JSON object, no markdown, no explanation.
 `

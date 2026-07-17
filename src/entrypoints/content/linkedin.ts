@@ -1141,6 +1141,7 @@ function detectFormFields(container: HTMLElement): Array<FormField> {
     el.setAttribute('data-ojk-field', fieldId)
 
     const maxLength = inferMaxLength(el, questionRoot)
+    const context = inferFieldHint(el, questionRoot, label)
 
     fields.push({
       id: fieldId,
@@ -1153,7 +1154,7 @@ function detectFormFields(container: HTMLElement): Array<FormField> {
             : el instanceof HTMLInputElement && el.type === 'number'
               ? 'number'
               : 'text',
-      required: el.required || label.endsWith('*') || label.endsWith('*'),
+      required: el.required || label.endsWith('*'),
       placeholder:
         el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
           ? el.placeholder
@@ -1165,6 +1166,7 @@ function detectFormFields(container: HTMLElement): Array<FormField> {
               .filter(Boolean)
           : undefined,
       selector: `[data-ojk-field="${fieldId}"]`,
+      context,
       maxLength,
       min: el instanceof HTMLInputElement ? el.min || undefined : undefined,
       max: el instanceof HTMLInputElement ? el.max || undefined : undefined,
@@ -1513,6 +1515,51 @@ function inferMaxLength(
     if (n > 0 && n < 500_000) return n
   }
   return undefined
+}
+
+/** Capture helper / example text so AI can follow formats like "Example: 200000". */
+function inferFieldHint(
+  el: HTMLElement,
+  questionRoot: Element | null,
+  label: string,
+): string | undefined {
+  const parts: Array<string> = []
+
+  const described = el.getAttribute('aria-describedby')
+  if (described) {
+    for (const id of described.split(/\s+/)) {
+      const node = document.getElementById(id)
+      const t = cleanLabelText(node?.textContent)
+      if (
+        t &&
+        t !== label &&
+        !/^\d+\s*\/\s*\d+$/.test(t) &&
+        !/invalid input/i.test(t)
+      ) {
+        parts.push(t)
+      }
+    }
+  }
+
+  const scope =
+    questionRoot ?? el.closest('div')?.parentElement ?? el.parentElement
+  if (scope) {
+    for (const p of scope.querySelectorAll('p')) {
+      const t = cleanLabelText(p.textContent)
+      if (!t || t === label) continue
+      if (/invalid input|of \d+ characters|\d+\s*\/\s*\d+/i.test(t)) continue
+      if (t.length < 8 || t.length > 240) continue
+      if (
+        /example:|please enter|in inr|annual|hint/i.test(t) ||
+        parts.length === 0
+      ) {
+        parts.push(t)
+      }
+    }
+  }
+
+  const unique = [...new Set(parts)].slice(0, 2)
+  return unique.length ? unique.join(' — ') : undefined
 }
 
 function collectRadioFields(

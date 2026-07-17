@@ -16,10 +16,12 @@ import {
   finalizeFieldAnswers,
   isAdditionalMonthsQuestion,
   isNoticePeriodQuestion,
+  isPlausibleAnnualCtc,
   isSalaryCtcQuestion,
   isYearsExperienceQuestion,
   monthsExperienceAnswer,
   noticeAnswerForProfile,
+  parseSalaryToNumber,
   salaryAnswerForProfile,
 } from '@/lib/autofill/normalize'
 import { onMessage } from '@/lib/messaging'
@@ -177,31 +179,110 @@ export default defineBackground(() => {
       const trackId = application.id
 
       try {
-        // 1. Resolve standard + years/numeric fields locally from profile
+        // 1. Resolve identity + known structured fields locally (fast, free)
         const localAnswers = resolveFieldsLocally(profile, fields)
 
-        // Find fields that still need AI answers
-        const unresolvedFields = fields.filter(
-          (f) => !String(localAnswers[f.id] ?? '').trim(),
-        )
+        // 2. Send ALL non-core fields to AI (custom employer questions change often).
+        //    Empty fields always go to AI. Core identity keeps local unless empty.
+        const aiFields = fields.filter((f) => {
+          const label = f.label.toLowerCase()
+          const hasLocal = !!String(localAnswers[f.id] ?? '').trim()
+          if (!hasLocal) return true
+          return !isCoreIdentityLabel(label)
+        })
+
         let answers = { ...localAnswers }
         let coverLetter: string | undefined
         let aiErrorMessage: string | null = null
 
-        // 2. Use AI for remaining custom / open-ended questions
-        if (unresolvedFields.length > 0) {
+        if (aiFields.length > 0) {
           try {
+            console.log(
+              `[OpenJobKit] AI filling ${aiFields.length}/${fields.length} fields (custom + open)`,
+            )
             const userPrompt = buildFillPrompt(
               profile,
               application.job,
-              unresolvedFields,
+              aiFields,
             )
             const aiAnswers = await generateFormAnswers(
               settings.ai,
               SYSTEM_PROMPT,
               userPrompt,
             )
-            answers = { ...answers, ...aiAnswers }
+            for (const [id, value] of Object.entries(aiAnswers ?? {})) {
+              if (!String(value ?? '').trim()) continue
+              const field = aiFields.find((f) => f.id === id)
+              // Never let AI write 0 into annual CTC fields
+              if (
+                field &&
+                isSalaryCtcQuestion(field.label) &&
+                !isPlausibleAnnualCtc(parseSalaryToNumber(String(value)) ?? 0)
+              ) {
+                continue
+              }
+              answers[id] = String(value)
+            }
+
+            // Structured profile answers win over bad AI zeros for CTC / notice / years
+            for (const field of fields) {
+              const label = field.label.toLowerCase()
+              if (isSalaryCtcQuestion(label)) {
+                answers[field.id] = salaryAnswerForProfile(
+                  profile,
+                  field.label,
+                  field,
+                )
+              } else if (isNoticePeriodQuestion(label)) {
+                answers[field.id] = noticeAnswerForProfile(
+                  profile,
+                  field.label,
+                  field,
+                )
+              } else if (
+                isYearsExperienceQuestion(label) &&
+                localAnswers[field.id]
+              ) {
+                const aiVal = parseInt(
+                  String(answers[field.id] ?? '').replace(/\D/g, ''),
+                  10,
+                )
+                const localVal = parseInt(
+                  String(localAnswers[field.id]).replace(/\D/g, ''),
+                  10,
+                )
+                if (
+                  !Number.isFinite(aiVal) ||
+                  (aiVal === 0 && Number.isFinite(localVal) && localVal > 0)
+                ) {
+                  answers[field.id] = localAnswers[field.id]
+                }
+              }
+            }
+
+            // Second pass for any required fields still empty after AI
+            const stillEmpty = aiFields.filter(
+              (f) => f.required && !String(answers[f.id] ?? '').trim(),
+            )
+            if (stillEmpty.length > 0) {
+              console.log(
+                `[OpenJobKit] AI retry for ${stillEmpty.length} empty required fields`,
+              )
+              const retryPrompt = buildFillPrompt(
+                profile,
+                application.job,
+                stillEmpty,
+              )
+              const retryAnswers = await generateFormAnswers(
+                settings.ai,
+                SYSTEM_PROMPT,
+                retryPrompt +
+                  '\n\nIMPORTANT: These required fields were left empty. You MUST provide an answer for each ID.',
+              )
+              for (const [id, value] of Object.entries(retryAnswers ?? {})) {
+                if (String(value ?? '').trim()) answers[id] = String(value)
+              }
+            }
           } catch (aiError) {
             console.error('[OpenJobKit] AI generation failed:', aiError)
             aiErrorMessage =
@@ -209,7 +290,7 @@ export default defineBackground(() => {
           }
         }
 
-        // 3. Coerce years/notice/numeric + fill gaps from profile
+        // 3. Coerce years/notice/CTC/numeric + fill remaining structured gaps
         answers = finalizeFieldAnswers(
           profile,
           fields,
@@ -217,12 +298,18 @@ export default defineBackground(() => {
           yearsAnswerForQuestion,
         )
 
-        const stillMissing = unresolvedFields.filter(
+        const stillMissing = fields.filter(
           (f) => f.required && !String(answers[f.id] ?? '').trim(),
         )
         if (stillMissing.length > 0 && aiErrorMessage) {
           throw new Error(
             `AI could not answer: ${stillMissing.map((f) => f.label).join('; ')}. ${aiErrorMessage}`,
+          )
+        }
+        if (stillMissing.length > 0) {
+          console.warn(
+            '[OpenJobKit] Required fields still empty after AI:',
+            stillMissing.map((f) => f.label),
           )
         }
 
@@ -585,6 +672,28 @@ function normalizeJobPath(url: string): string {
 // (Used only after AI is confirmed configured — fills name/email/etc. without
 // burning tokens, then AI handles the remaining open-ended questions.)
 // ────────────────────────────────────────────────────────────────────────────
+
+/** Identity / contact fields we trust local profile for (AI not required). */
+function isCoreIdentityLabel(label: string): boolean {
+  const l = label.toLowerCase()
+  if (l.includes('how many') || l.includes('ctc') || l.includes('salary')) {
+    return false
+  }
+  return (
+    l.includes('first name') ||
+    l.includes('given name') ||
+    l.includes('last name') ||
+    l.includes('family name') ||
+    l.includes('surname') ||
+    l.includes('full name') ||
+    ((l.includes('email') || l.includes('e-mail')) && !l.includes('company')) ||
+    ((l.includes('phone') || l.includes('mobile') || l.includes('telephone')) &&
+      !l.includes('company')) ||
+    l.includes('country code') ||
+    l.includes('phone country') ||
+    l.includes('dialing code')
+  )
+}
 
 function resolveFieldsLocally(
   profile: UserProfile,

@@ -82,7 +82,13 @@ export function parseSalaryToNumber(raw: string | undefined): number | null {
   const digits = t.replace(/[^\d]/g, '')
   if (!digits) return null
   const n = parseInt(digits, 10)
-  return Number.isFinite(n) ? n : null
+  if (!Number.isFinite(n)) return null
+  return n
+}
+
+/** Annual INR CTC under 50k is almost always a bad parse / AI zero — reject. */
+export function isPlausibleAnnualCtc(amount: number): boolean {
+  return amount >= 50_000 && amount <= 500_000_000
 }
 
 export function salaryAnswerForProfile(
@@ -92,7 +98,8 @@ export function salaryAnswerForProfile(
 ): string {
   const l = label.toLowerCase()
   const isCurrent = /\bcurrent\b|\bpresent\b|\bexisting\b/.test(l)
-  const isMonthly = /\bmonth(ly)?\b/.test(l)
+  const isMonthly =
+    /\bmonth(ly)?\b/.test(l) && !/\bmonths of experience\b/.test(l)
 
   let raw: string | undefined
   if (isCurrent) {
@@ -109,11 +116,16 @@ export function salaryAnswerForProfile(
   }
 
   let amount = parseSalaryToNumber(raw)
-  // Sensible INR annual defaults when profile has no number
+
+  // Reject junk zeros / tiny values from empty profile or bad AI
+  if (amount != null && !isMonthly && !isPlausibleAnnualCtc(amount)) {
+    amount = null
+  }
+
   if (amount == null) {
     amount = isCurrent ? 600_000 : 900_000
   }
-  if (isMonthly) amount = Math.round(amount / 12)
+  if (isMonthly) amount = Math.max(1, Math.round(amount / 12))
 
   const asStr = String(amount)
   if (field?.options?.length) {
@@ -259,8 +271,13 @@ export function coerceAnswerForField(
   }
 
   if (isSalaryCtcQuestion(label)) {
+    const isMonthly =
+      /\bmonth(ly)?\b/.test(label.toLowerCase()) &&
+      !/\bmonths of experience\b/.test(label.toLowerCase())
     const parsed = parseSalaryToNumber(v)
-    if (parsed != null) {
+    const ok =
+      parsed != null && (isMonthly ? parsed > 0 : isPlausibleAnnualCtc(parsed))
+    if (ok) {
       v = String(parsed)
     } else if (profile) {
       return salaryAnswerForProfile(profile, label, field)
@@ -317,9 +334,11 @@ export function finalizeFieldAnswers(
 
     if (
       !String(value ?? '').trim() ||
-      (isSalaryCtcQuestion(label) && !/\d/.test(String(value)))
+      (isSalaryCtcQuestion(label) &&
+        !isPlausibleAnnualCtc(parseSalaryToNumber(String(value)) ?? 0))
     ) {
       if (isSalaryCtcQuestion(label)) {
+        // Always prefer profile CTC over AI zeros / junk
         value = salaryAnswerForProfile(profile, label, field)
       } else if (isNoticePeriodQuestion(label)) {
         value = noticeAnswerForProfile(profile, label, field)
