@@ -22,10 +22,11 @@ Guidelines:
 Critical answer formats (LinkedIn Easy Apply validation is strict):
 1. Years of experience / duration / numeric questions → return ONLY a number string like "2" or "3". Never write "2 years" or a sentence.
 2. Notice period / joining time → return ONLY a number. Use days unless the question says weeks or months. "Immediately available" → "0". Example: "30" for 30 days.
-3. Yes/No questions → return ONLY "Yes" or "No" (or an exact option from the list).
-4. Short text with a character limit → stay under the limit; prefer a number or a few words.
-5. Do not repeat the question in the answer.
-6. For select/radio, return one of the provided options exactly as written.`
+3. CTC / salary / compensation (especially INR) → return ONLY digits, no commas or currency words. Example: "200000" or "350000". Never write "Open to discussion".
+4. Yes/No questions → return ONLY "Yes" or "No" (or an exact option from the list).
+5. Short text with a character limit → stay under the limit; prefer a number or a few words.
+6. Do not repeat the question in the answer.
+7. For select/radio, return one of the provided options exactly as written.`
 
 // ────────────────────────────────────────────────────────────────────────────
 // Fill Fields Prompt

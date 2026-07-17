@@ -149,19 +149,22 @@ Lovely Professional University, Punjab | Aug 2020 – Oct 2024`,
     'Infrastructure Engineer',
   ],
   targetLocations: ['Delhi NCR', 'Remote', 'Bengaluru', 'Hyderabad'],
-  desiredSalary: undefined,
+  desiredSalary: '900000', // INR annual — digits only for LinkedIn CTC fields
   remotePreference: 'remote',
   noticePeriod: '0', // days — LinkedIn expects a number (0 = immediate)
 
   // ── Cached answers (pre-fill common questions) ─────────────────────────────
   cachedAnswers: {
     'years of experience': '2',
+    'additional months': '0',
     'are you authorized to work': 'Yes',
     'require visa sponsorship': 'No',
     'highest education': "Bachelor's Degree",
     'willing to relocate': 'Yes',
     'notice period': '0',
-    'expected salary': 'Open to discussion',
+    'current ctc': '600000',
+    'expected ctc': '900000',
+    'expected salary': '900000',
     'how did you hear about us': 'Job board',
   },
 }

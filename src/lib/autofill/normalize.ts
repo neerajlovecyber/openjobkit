@@ -37,17 +37,106 @@ export function isYearsExperienceQuestion(label: string): boolean {
 export function isStrictNumericQuestion(label: string): boolean {
   const l = label.toLowerCase()
   if (isNoticePeriodQuestion(l)) return true
+  if (isSalaryCtcQuestion(l)) return true
   if (isYearsExperienceQuestion(l)) return true
   return (
     /\bhow many\b/.test(l) ||
     /\bgpa\b/.test(l) ||
     /\bscale of\b/.test(l) ||
-    /\brating\b/.test(l) ||
-    (/\b(salary|ctc|compensation|pay)\b/.test(l) &&
-      !/\b(negotiate|discuss|expected range)\b/.test(l) &&
-      (/\b(current|present|expected|desired|annual|monthly)\b/.test(l) ||
-        /\b\d/.test(l)))
+    /\brating\b/.test(l)
   )
+}
+
+export function isSalaryCtcQuestion(label: string): boolean {
+  const l = label.toLowerCase()
+  return (
+    /\bctc\b/.test(l) ||
+    (/\b(salary|compensation|pay)\b/.test(l) && !/\bpaypal\b/.test(l))
+  )
+}
+
+export function isAdditionalMonthsQuestion(label: string): boolean {
+  const l = label.toLowerCase()
+  return (
+    /\bmonths?\b/.test(l) &&
+    /\b(experience|additional)\b/.test(l) &&
+    !/\byears?\b/.test(l)
+  )
+}
+
+/**
+ * LinkedIn CTC fields want digits only, e.g. 200000 (INR annual).
+ * Parses lakhs/LPA and strips currency prose.
+ */
+export function parseSalaryToNumber(raw: string | undefined): number | null {
+  if (!raw?.trim()) return null
+  const t = raw.trim().toLowerCase().replace(/,/g, '')
+  if (/open to discussion|negotiable|not applicable|n\/a/.test(t)) return null
+
+  const lakh = t.match(/([\d.]+)\s*(lakh|lac|lpa)/)
+  if (lakh) return Math.round(parseFloat(lakh[1]) * 100_000)
+
+  const crore = t.match(/([\d.]+)\s*crore/)
+  if (crore) return Math.round(parseFloat(crore[1]) * 10_000_000)
+
+  const digits = t.replace(/[^\d]/g, '')
+  if (!digits) return null
+  const n = parseInt(digits, 10)
+  return Number.isFinite(n) ? n : null
+}
+
+export function salaryAnswerForProfile(
+  profile: UserProfile,
+  label: string,
+  field?: FormField,
+): string {
+  const l = label.toLowerCase()
+  const isCurrent = /\bcurrent\b|\bpresent\b|\bexisting\b/.test(l)
+  const isMonthly = /\bmonth(ly)?\b/.test(l)
+
+  let raw: string | undefined
+  if (isCurrent) {
+    raw =
+      profile.cachedAnswers?.['current ctc'] ||
+      profile.cachedAnswers?.['current salary'] ||
+      profile.cachedAnswers?.['current compensation']
+  } else {
+    raw =
+      profile.desiredSalary ||
+      profile.cachedAnswers?.['expected ctc'] ||
+      profile.cachedAnswers?.['expected salary'] ||
+      profile.cachedAnswers?.['desired salary']
+  }
+
+  let amount = parseSalaryToNumber(raw)
+  // Sensible INR annual defaults when profile has no number
+  if (amount == null) {
+    amount = isCurrent ? 600_000 : 900_000
+  }
+  if (isMonthly) amount = Math.round(amount / 12)
+
+  const asStr = String(amount)
+  if (field?.options?.length) {
+    return fuzzyPickNumericOption(field.options, amount) ?? asStr
+  }
+  if (field?.maxLength && asStr.length > field.maxLength) {
+    return asStr.slice(0, field.maxLength)
+  }
+  return asStr
+}
+
+export function monthsExperienceAnswer(
+  profile: UserProfile,
+  field?: FormField,
+): string {
+  const cached =
+    profile.cachedAnswers?.['additional months'] ||
+    profile.cachedAnswers?.['months of experience']
+  const n = parseSalaryToNumber(cached) ?? 0
+  if (field?.options?.length) {
+    return fuzzyPickNumericOption(field.options, n) ?? String(n)
+  }
+  return String(Math.max(0, Math.min(12, n)))
 }
 
 export type NoticeUnit = 'days' | 'weeks' | 'months'
@@ -169,9 +258,42 @@ export function coerceAnswerForField(
     return formatNoticeForQuestion(days, label, field)
   }
 
+  if (isSalaryCtcQuestion(label)) {
+    const parsed = parseSalaryToNumber(v)
+    if (parsed != null) {
+      v = String(parsed)
+    } else if (profile) {
+      return salaryAnswerForProfile(profile, label, field)
+    } else {
+      v = ''
+    }
+    if (field.options?.length && v) {
+      const n = parseInt(v, 10)
+      return fuzzyPickNumericOption(field.options, n) ?? v
+    }
+    if (field.maxLength && field.maxLength > 0 && v.length > field.maxLength) {
+      return v.slice(0, field.maxLength)
+    }
+    return v
+  }
+
+  if (isAdditionalMonthsQuestion(label)) {
+    const n = parseSalaryToNumber(v) ?? 0
+    if (field.options?.length) {
+      return fuzzyPickNumericOption(field.options, n) ?? String(n)
+    }
+    return String(n)
+  }
+
   if (isYearsExperienceQuestion(label) || isStrictNumericQuestion(label)) {
     const m = v.match(/-?\d+(?:\.\d+)?/)
     v = m ? m[0] : v.replace(/[^\d.]/g, '')
+    if (field.options?.length && v) {
+      const n = parseInt(v, 10)
+      if (Number.isFinite(n)) {
+        return fuzzyPickNumericOption(field.options, n) ?? v
+      }
+    }
   }
 
   if (field.maxLength && field.maxLength > 0 && v.length > field.maxLength) {
@@ -191,12 +313,26 @@ export function finalizeFieldAnswers(
 
   for (const field of fields) {
     let value = out[field.id]
+    const label = field.label
 
-    if (!String(value ?? '').trim()) {
-      if (isNoticePeriodQuestion(field.label)) {
-        value = noticeAnswerForProfile(profile, field.label, field)
-      } else if (isYearsExperienceQuestion(field.label) && yearsFallback) {
-        value = yearsFallback(profile, field.label.toLowerCase())
+    if (
+      !String(value ?? '').trim() ||
+      (isSalaryCtcQuestion(label) && !/\d/.test(String(value)))
+    ) {
+      if (isSalaryCtcQuestion(label)) {
+        value = salaryAnswerForProfile(profile, label, field)
+      } else if (isNoticePeriodQuestion(label)) {
+        value = noticeAnswerForProfile(profile, label, field)
+      } else if (isAdditionalMonthsQuestion(label)) {
+        value = monthsExperienceAnswer(profile, field)
+      } else if (isYearsExperienceQuestion(label) && yearsFallback) {
+        value = yearsFallback(profile, label.toLowerCase())
+        if (field.options?.length) {
+          const n = parseInt(String(value).replace(/\D/g, ''), 10)
+          if (Number.isFinite(n)) {
+            value = fuzzyPickNumericOption(field.options, n) ?? value
+          }
+        }
       }
     }
 

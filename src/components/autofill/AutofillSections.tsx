@@ -605,11 +605,25 @@ export function PreferencesSection({
           />
         </Field>
       </div>
-      <Field label="Desired Salary">
+      <Field label="Desired salary">
         <input
           className={fieldClass}
+          placeholder="Digits only for CTC forms, e.g. 900000"
           value={profile.desiredSalary || ''}
           onChange={(e) => onChange('desiredSalary', e.target.value)}
+        />
+      </Field>
+      <Field label="Current salary (optional)">
+        <input
+          className={fieldClass}
+          placeholder="Digits only, e.g. 600000"
+          value={profile.cachedAnswers?.['current ctc'] || ''}
+          onChange={(e) =>
+            onChange('cachedAnswers', {
+              ...profile.cachedAnswers,
+              'current ctc': e.target.value,
+            })
+          }
         />
       </Field>
       <Field label="Summary">

@@ -14,9 +14,13 @@ import {
 } from '@/lib/ai/prompts'
 import {
   finalizeFieldAnswers,
+  isAdditionalMonthsQuestion,
   isNoticePeriodQuestion,
+  isSalaryCtcQuestion,
   isYearsExperienceQuestion,
+  monthsExperienceAnswer,
   noticeAnswerForProfile,
+  salaryAnswerForProfile,
 } from '@/lib/autofill/normalize'
 import { onMessage } from '@/lib/messaging'
 import {
@@ -683,14 +687,13 @@ function resolveFieldsLocally(
     else if (isNoticePeriodQuestion(label)) {
       answers[field.id] = noticeAnswerForProfile(profile, label, field)
     }
-    // Salary / CTC / compensation
-    else if (
-      label.includes('salary') ||
-      label.includes('compensation') ||
-      label.includes('ctc') ||
-      (label.includes('pay') && !label.includes('paypal'))
-    ) {
-      answers[field.id] = profile.desiredSalary || 'Open to discussion'
+    // Salary / CTC — digits only (e.g. 200000 INR annual)
+    else if (isSalaryCtcQuestion(label)) {
+      answers[field.id] = salaryAnswerForProfile(profile, label, field)
+    }
+    // Additional months of experience (dropdown)
+    else if (isAdditionalMonthsQuestion(label)) {
+      answers[field.id] = monthsExperienceAnswer(profile, field)
     }
     // Standard questions: Authorized to work
     else if (
@@ -862,10 +865,11 @@ function matchCachedAnswer(profile: UserProfile, label: string): string | null {
     }
   }
 
-  // Skill-specific years questions should not use the generic "years of experience" cache alone
-  // when we can compute a better skill-aware number — handled by isYearsExperienceQuestion first.
-  // Only use generic years cache when label is generic.
+  // Skill-specific years / numeric CTC should not use prose cached answers
   if (best?.key === 'years of experience' && isSkillSpecificYears(label)) {
+    return null
+  }
+  if (best && isSalaryCtcQuestion(label) && !/\d/.test(best.value)) {
     return null
   }
 
